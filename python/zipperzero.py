@@ -1,3 +1,24 @@
+# CODEPILLS-META-BEGIN
+# schema: codepills.tool/v1
+# name: zipper-zero
+# version: 1.0.0
+# author: octanima-labs
+# description: List, test, extract, and create ZIP archives using the Python standard library.
+# repo: https://github.com/octanima-labs/codepills/blob/main/python/zipperzero.py
+# license: MIT
+# usage: python python/zipperzero.py SOURCE [OPTIONS]
+# tags:
+#   - python
+#   - cli
+#   - zip
+# requires:
+#   - Python standard library
+# platforms:
+#   - Linux
+#   - macOS
+#   - Windows
+# CODEPILLS-META-END
+
 """Zipper-Zero: a standard-library-only ZIP CLI and helper."""
 
 import argparse

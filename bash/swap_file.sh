@@ -1,4 +1,28 @@
 #!/usr/bin/env bash
+# CODEPILLS-META-BEGIN
+# schema: codepills.tool/v1
+# name: swap-file
+# version: 1.0.0
+# author: octanima-labs
+# description: Create, enable, and persist a Linux swap file.
+# repo: https://github.com/octanima-labs/codepills/blob/main/bash/swap_file.sh
+# license: MIT
+# usage: sudo bash/swap_file.sh [OPTIONS]
+# tags:
+#   - bash
+#   - linux
+#   - swap
+# requires:
+#   - bash
+#   - root privileges
+#   - fallocate or dd
+#   - chmod
+#   - mkswap
+#   - swapon
+# platforms:
+#   - Linux
+# CODEPILLS-META-END
+
 set -euo pipefail
 
 # Create and enable a swap file on EndeavourOS / Arch Linux.

@@ -1,4 +1,27 @@
 <#
+CODEPILLS-META-BEGIN
+schema: codepills.tool/v1
+name: barabara
+version: 1.0.0
+author: octanima-labs
+description: Split large files into chunks and join them back with hash verification.
+repo: https://github.com/octanima-labs/codepills/blob/main/powershell/barabara.ps1
+license: MIT
+usage: pwsh -NoProfile -File powershell/barabara.ps1 split PATH
+tags:
+  - powershell
+  - cli
+  - files
+requires:
+  - PowerShell
+platforms:
+  - Windows
+  - Linux
+  - macOS
+CODEPILLS-META-END
+#>
+
+<#
 Notes:
     - SPLIT creates a folder like: bigfile.parts
         - chunks are stored inside that folder as: bigfile.part.000, .001, .002 ...

@@ -1,3 +1,25 @@
+# CODEPILLS-META-BEGIN
+# schema: codepills.tool/v1
+# name: ping-wave
+# version: 1.0.0
+# author: octanima-labs
+# description: Ping multiple targets in parallel with the system ping command.
+# repo: https://github.com/octanima-labs/codepills/blob/main/python/pingwave.py
+# license: MIT
+# usage: python python/pingwave.py TARGET [TARGET ...]
+# tags:
+#   - python
+#   - cli
+#   - network
+# requires:
+#   - Python standard library
+#   - system ping command
+# platforms:
+#   - Linux
+#   - macOS
+#   - Windows
+# CODEPILLS-META-END
+
 """Self-contained CLI for pinging multiple targets in parallel.
 
 ping-wave intentionally uses the operating system's ``ping`` executable instead

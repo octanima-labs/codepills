@@ -1,3 +1,24 @@
+/*
+CODEPILLS-META-BEGIN
+schema: codepills.tool/v1
+name: xda-markdown
+version: 1.0.0
+author: octanima-labs
+description: Extract an XDA article from the browser DOM and print Markdown.
+repo: https://github.com/octanima-labs/codepills/blob/main/js/xda.js
+license: MIT
+usage: Paste into a browser console on an XDA article page.
+tags:
+  - javascript
+  - browser
+  - markdown
+requires:
+  - browser DOM
+platforms:
+  - browser
+CODEPILLS-META-END
+*/
+
 function getImages(elem){
     if (elem.querySelectorAll('img') === null){
       return [];

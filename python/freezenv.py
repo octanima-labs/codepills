@@ -1,3 +1,24 @@
+# CODEPILLS-META-BEGIN
+# schema: codepills.tool/v1
+# name: freezenv
+# version: 1.0.0
+# author: octanima-labs
+# description: Generate auto_requirements.txt from packages installed in a Python virtual environment.
+# repo: https://github.com/octanima-labs/codepills/blob/main/python/freezenv.py
+# license: MIT
+# usage: python python/freezenv.py [PATH]
+# tags:
+#   - python
+#   - cli
+#   - virtualenv
+# requires:
+#   - Python standard library
+# platforms:
+#   - Linux
+#   - macOS
+#   - Windows
+# CODEPILLS-META-END
+
 """Generate a requirements file from an existing Python virtual environment.
 
 ``freezenv`` is a small, dependency-free alternative to running ``pip freeze``
