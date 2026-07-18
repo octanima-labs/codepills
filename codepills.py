@@ -98,6 +98,10 @@ class EnsurePathError(ValueError):
     """Raised when codepills cannot be installed on PATH."""
 
 
+class RepoConfigError(ValueError):
+    """Raised when repository URL metadata cannot be inferred."""
+
+
 def run_git(root: Path, *args: str) -> str | None:
     """Return stripped Git output from the public repo, or None on failure."""
     try:
@@ -120,16 +124,22 @@ def run_git(root: Path, *args: str) -> str | None:
 def origin_to_https(remote_url: str | None) -> str:
     """Convert a Git remote URL to a public HTTPS repository URL."""
     if not remote_url:
-        return "https://github.com/octanima-labs/codepills"
+        raise RepoConfigError("git remote origin is not configured")
 
-    if remote_url.startswith("git@github.com:"):
-        path = remote_url.removeprefix("git@github.com:").removesuffix(".git")
-        return f"https://github.com/{path}"
+    scp_match = re.fullmatch(r"(?:[^@]+@)?([^:]+):(.+)", remote_url)
+    if scp_match:
+        host, path = scp_match.groups()
+        return f"https://{host}/{path.removesuffix('.git')}"
 
-    if remote_url.startswith("https://"):
+    ssh_match = re.fullmatch(r"ssh://(?:[^@]+@)?([^/]+)/(.+)", remote_url)
+    if ssh_match:
+        host, path = ssh_match.groups()
+        return f"https://{host}/{path.removesuffix('.git')}"
+
+    if remote_url.startswith(("https://", "http://")):
         return remote_url.removesuffix(".git")
 
-    return "https://github.com/octanima-labs/codepills"
+    raise RepoConfigError(f"cannot infer HTTPS repo URL from origin: {remote_url}")
 
 
 def repo_base_url(root: Path) -> str:
@@ -322,12 +332,6 @@ def validate_metadata(
     version = metadata.get("version")
     if isinstance(version, str) and not VERSION_PATTERN.fullmatch(version):
         errors.append("version must use X.Y.Z")
-
-    if validate_repo:
-        expected_repo = repo_url_for(path, root)
-        repo = metadata.get("repo")
-        if repo is not None and repo != expected_repo:
-            errors.append(f"repo must be {expected_repo}")
 
     for key in LIST_KEYS:
         value = metadata.get(key)
@@ -728,6 +732,69 @@ def ensure_codepills_on_path(root: Path) -> list[str]:
     return actions
 
 
+def confirm_reset() -> bool:
+    """Prompt before resetting the collection."""
+    try:
+        answer = input(
+            "This will delete scripts/snippets and reinitialize git. Continue? [y/N] "
+        )
+    except EOFError:
+        return False
+    return answer.strip().casefold() == "y"
+
+
+def remove_path(path: Path) -> None:
+    """Remove a file, symlink, or directory tree."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def reset_language_folders(root: Path) -> None:
+    """Empty language folders and recreate snippet notebooks."""
+    for language in LANGUAGE_EXTENSIONS:
+        directory = root / language
+        directory.mkdir(parents=True, exist_ok=True)
+        for child in directory.iterdir():
+            remove_path(child)
+
+    for relative in SNIPPET_FILES:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+
+
+def reset_git_repo(root: Path) -> None:
+    """Remove the current Git repository metadata and create a fresh repo."""
+    git_path = root / ".git"
+    if git_path.exists() or git_path.is_symlink():
+        remove_path(git_path)
+
+    completed = subprocess.run(
+        ["git", "init"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "git init failed"
+        raise OSError(detail)
+
+
+def reset_collection(root: Path) -> list[str]:
+    """Reset the repository into a fresh Code Pills collection."""
+    reset_language_folders(root)
+    reset_git_repo(root)
+    return [
+        "emptied language folders",
+        "recreated empty snippet notebooks",
+        "reinitialized git repository without remotes",
+    ]
+
+
 def strip_snippet_comment(line: str, comment: str) -> str | None:
     """Return uncommented snippet metadata text, or None for non-comment lines."""
     if not line.startswith(comment):
@@ -864,6 +931,9 @@ def parse_snippet_file(path: Path, root: Path) -> tuple[list[dict[str, object]],
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as error:
         return [], [str(error)]
+
+    if not any(line.strip() for line in lines):
+        return [], []
 
     comment = str(config["comment"])
     prefix = str(config["prefix"])
@@ -1178,7 +1248,11 @@ def command_import(args: argparse.Namespace, root: Path) -> int:
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     if has_metadata_header(source):
-        errors = copy_with_existing_metadata(source, destination, root)
+        try:
+            errors = copy_with_existing_metadata(source, destination, root)
+        except RepoConfigError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
         if errors:
             destination.unlink(missing_ok=True)
             print(f"error: source metadata is invalid: {source}", file=sys.stderr)
@@ -1186,7 +1260,11 @@ def command_import(args: argparse.Namespace, root: Path) -> int:
                 print(f"  - {error}", file=sys.stderr)
             return 1
     else:
-        metadata = default_metadata(source, destination, root)
+        try:
+            metadata = default_metadata(source, destination, root)
+        except RepoConfigError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
         insert_metadata_header(source, destination, metadata)
 
     print(f"Imported {source} -> {destination.relative_to(root)}")
@@ -1288,6 +1366,24 @@ def command_ensurepath(_args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def command_reset(args: argparse.Namespace, root: Path) -> int:
+    """Reset the repository into a fresh Code Pills collection."""
+    if not args.force and not confirm_reset():
+        print("reset cancelled")
+        return 1
+
+    try:
+        actions = reset_collection(root)
+    except OSError as error:
+        print(f"error: reset failed: {error}", file=sys.stderr)
+        return 1
+
+    for action in actions:
+        print(action)
+    print("configure a new origin with: git remote add origin <YOUR_REPO_URL>")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the Code Pills command-line parser."""
     parser = argparse.ArgumentParser(
@@ -1307,6 +1403,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="install the codepills command in the user PATH",
     )
     ensurepath_parser.set_defaults(func=command_ensurepath)
+
+    reset_parser = subparsers.add_parser(
+        "reset",
+        help="reset this repo into a fresh Code Pills collection",
+    )
+    reset_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="reset without prompting for confirmation",
+    )
+    reset_parser.set_defaults(func=command_reset)
 
     import_parser = subparsers.add_parser(
         "import",

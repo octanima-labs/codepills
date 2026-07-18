@@ -16,6 +16,8 @@ running standalone tools.
 Run commands from the repository root.
 
 ```bash
+git clone git@github.com:octanima-labs/codepills.git codepills
+cd codepills
 python codepills.py check
 python codepills.py ensurepath
 python codepills.py search
@@ -23,6 +25,14 @@ python codepills.py search --type snippet -t linux
 python codepills.py search --type script -t python -D
 python codepills.py get py0006
 python codepills.py run python/pingwave --tests
+```
+
+To start a fresh Code Pills collection from this toolset:
+
+```bash
+python codepills.py ensurepath
+codepills reset --force
+git remote add origin <YOUR_REPO_URL>
 ```
 
 ## CLI
@@ -42,6 +52,27 @@ On POSIX systems this makes `codepills.py` executable, creates a
 `~/.local/bin/codepills` symlink, and adds `~/.local/bin` to a shell startup file
 when needed. On Windows it creates a `codepills.cmd` shim in `%USERPROFILE%\.local\bin`
 and adds that directory to the user PATH.
+
+### Reset
+
+Reset the repository into a fresh Code Pills collection.
+
+```bash
+codepills reset
+codepills reset --force
+```
+
+`reset` empties language folders, recreates empty snippet notebooks, removes the
+current `.git` directory, and runs `git init`. It keeps `codepills.py`,
+`README.md`, and the language folders. It does not configure a remote.
+
+After reset, configure your own remote:
+
+```bash
+git remote add origin <YOUR_REPO_URL>
+```
+
+Without `--force`, `reset` asks for confirmation with a default No answer.
 
 ### Check
 
@@ -126,6 +157,9 @@ The destination directory is chosen from the file extension:
 `--name` is a filename stem only; the original extension is preserved. Existing
 destination files are not overwritten.
 
+The generated `repo` metadata is inferred from `git remote origin`. If `origin`
+is not configured, `import` fails with a clear error.
+
 ## Standalone Script Metadata
 
 Every standalone script must start with a parseable `CODEPILLS-META` header.
@@ -138,14 +172,16 @@ Required fields:
 - `version` using `X.Y.Z`
 - `author`
 - `description`
-- `repo`, pointing to the file URL on GitHub
+- `repo`, pointing to the script's public source URL
 - `license`
 - `usage`
 - `tags`
 - `requires`
 - `platforms`
 
-Run `python codepills.py check` after editing scripts.
+Run `python codepills.py check` after editing scripts. `check` requires `repo`
+to be present, but it does not require the URL to match the current local
+`origin`; imported scripts may preserve their original upstream URLs.
 
 ## Snippet Format
 
