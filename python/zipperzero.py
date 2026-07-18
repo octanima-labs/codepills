@@ -3,7 +3,7 @@
 # name: zipper-zero
 # version: 1.0.0
 # author: octanima-labs
-# description: List, test, extract, and create ZIP archives using the Python standard library.
+# description: List, test, extract, and create ZIP and TAR archives using the Python standard library.
 # repo: https://github.com/octanima-labs/codepills/blob/main/python/zipperzero.py
 # license: MIT
 # usage: python python/zipperzero.py SOURCE [OPTIONS]
@@ -11,6 +11,7 @@
 #   - python
 #   - cli
 #   - zip
+#   - tar
 # requires:
 #   - Python standard library
 # platforms:
@@ -19,22 +20,24 @@
 #   - Windows
 # CODEPILLS-META-END
 
-"""Zipper-Zero: a standard-library-only ZIP CLI and helper."""
+"""Zipper-Zero: a standard-library-only ZIP/TAR CLI and helper."""
 
 import argparse
 import io
 import shutil
 import sys
+import tarfile
 import unittest
+import zlib
 from contextlib import redirect_stderr, redirect_stdout
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile, is_zipfile
 
 
 def _safe_member_name(name: str) -> bool:
-    """Return True when a ZIP member path is safe to extract."""
+    """Return True when an archive member path is safe to extract."""
     if not name or "\x00" in name:
         return False
 
@@ -44,6 +47,35 @@ def _safe_member_name(name: str) -> bool:
         return False
 
     return ".." not in posix_path.parts and ".." not in windows_path.parts
+
+
+def _archive_format_for_existing(path: Path) -> str:
+    """Detect the archive format for an existing archive path."""
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if is_zipfile(path):
+        return "zip"
+    if tarfile.is_tarfile(path):
+        return "tar"
+    raise ValueError(f"Unsupported archive format: {path}")
+
+
+def _archive_format_for_output(path: Path) -> str:
+    """Return the archive format implied by an output path."""
+    suffixes = [suffix.lower() for suffix in path.suffixes]
+    if suffixes[-2:] == [".tar", ".gz"] or path.suffix.lower() == ".tgz":
+        return "tar.gz"
+    if path.suffix.lower() == ".tar":
+        return "tar"
+    return "zip"
+
+
+def _default_extract_destination(path: Path) -> Path:
+    """Return the default extraction directory for an archive path."""
+    suffixes = [suffix.lower() for suffix in path.suffixes]
+    if suffixes[-2:] == [".tar", ".gz"]:
+        return path.with_suffix("").with_suffix("")
+    return path.with_suffix("")
 
 
 def _merge_extracted_tree(staged: Path, destination: Path):
@@ -68,7 +100,7 @@ def _merge_extracted_tree(staged: Path, destination: Path):
 
 
 def _compress_level(value: str) -> int:
-    """Parse a ZIP compression level accepted by `zipfile.ZipFile`."""
+    """Parse a compression level accepted by supported compressed formats."""
     try:
         level = int(value)
     except ValueError as error:
@@ -82,7 +114,7 @@ def _compress_level(value: str) -> int:
 def _build_parser():
     parser = argparse.ArgumentParser(
         prog="zz",
-        description="Zipper-Zero lists, tests, extracts, and creates ZIP archives.",
+        description="Zipper-Zero lists, tests, extracts, and creates ZIP and TAR archives.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
@@ -91,6 +123,7 @@ def _build_parser():
             "  zz --extract archive.zip -o out_dir\n"
             "  zz --extract archive.zip -o out_dir --force\n"
             "  zz --create source_dir --compress-level 9\n"
+            "  zz --create source_dir -o archive.tar.gz\n"
             "  zipper-zero --self-test"
         ),
     )
@@ -99,14 +132,14 @@ def _build_parser():
         metavar="SOURCE",
         nargs="?",
         type=Path,
-        help="ZIP archive for list/test/extract, or file/directory for --create.",
+        help="ZIP/TAR archive for list/test/extract, or file/directory for --create.",
     )
     parser.add_argument(
         "-o", "--output",
         metavar="OUT_PATH",
         type=Path,
         help=(
-            "Output ZIP path for --create or destination directory for --extract. "
+            "Output archive path for --create or destination directory for --extract. "
             "Defaults to a sibling .zip for create and archive-stem/ for extract."
         ),
     )
@@ -115,7 +148,7 @@ def _build_parser():
         action="store_true",
         default=False,
         help=(
-            "For --create, replace an existing output ZIP. For --extract, merge into "
+            "For --create, replace an existing output archive. For --extract, merge into "
             "a non-empty destination and overwrite matching files."
         ),
     )
@@ -123,7 +156,10 @@ def _build_parser():
         "--compress-level",
         metavar="LEVEL",
         type=_compress_level,
-        help="Compression level for --create only: 0 (fastest) through 9 (smallest).",
+        help=(
+            "Compression level for --create ZIP/TAR.GZ output: "
+            "0 (fastest) through 9 (smallest)."
+        ),
     )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
@@ -138,14 +174,14 @@ def _build_parser():
         dest="mode",
         action="store_const",
         const="extract",
-        help="Safely extract a ZIP archive to a directory.",
+        help="Safely extract a ZIP/TAR archive to a directory.",
     )
     modes.add_argument(
         "-c", "--create",
         dest="mode",
         action="store_const",
         const="create",
-        help="Create a ZIP archive from a file or directory SOURCE.",
+        help="Create a ZIP/TAR archive from a file or directory SOURCE.",
     )
     modes.add_argument(
         "-t", "--test",
@@ -186,19 +222,23 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace):
 
 
 class ZipperZero:
-    """Project-facing ZIP helper for archive operations.
+    """Project-facing helper for archive operations.
 
-    Instantiate `ZipperZero(path)` for existing archives and use it as a
+    Instantiate `ZipperZero(path)` for existing ZIP/TAR archives and use it as a
     context manager or call `close()` when finished. Use `ZipperZero.create()`
     to create archives; it returns the output `Path`.
     """
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self.archive = ZipFile(self.path)
+        self.format = _archive_format_for_existing(self.path)
+        if self.format == "zip":
+            self.archive = ZipFile(self.path)
+        else:
+            self.archive = tarfile.open(self.path, "r:*")
 
     def close(self):
-        """Close the underlying `zipfile.ZipFile`."""
+        """Close the underlying archive handle."""
         self.archive.close()
 
     def __enter__(self):
@@ -209,12 +249,62 @@ class ZipperZero:
         return False
 
     def contents(self, detailed: bool = False):
-        """Return archive member names, or `ZipInfo` objects when detailed."""
-        return self.archive.infolist() if detailed else self.archive.namelist()
+        """Return archive member names, or member info objects when detailed."""
+        if self.format == "zip":
+            return self.archive.infolist() if detailed else self.archive.namelist()
+        return self.archive.getmembers() if detailed else self.archive.getnames()
 
     def test(self):
         """Return the first corrupt member name, or `None` when the archive is OK."""
-        return self.archive.testzip()
+        if self.format == "zip":
+            return self.archive.testzip()
+
+        current_name = "<archive>"
+        try:
+            for member in self.archive.getmembers():
+                current_name = member.name
+                if not member.isfile():
+                    continue
+                extracted = self.archive.extractfile(member)
+                if extracted is None:
+                    return member.name
+                with extracted:
+                    while extracted.read(1024 * 1024):
+                        pass
+        except (tarfile.TarError, OSError, EOFError, zlib.error):
+            return current_name
+        return None
+
+    def _safe_tar_members(self, destination: Path, members=None):
+        """Return TAR members that are safe to extract."""
+        if members is None:
+            requested = None
+        else:
+            requested = {
+                member.name if hasattr(member, "name") else str(member)
+                for member in members
+            }
+
+        safe_members = []
+        for member in self.archive.getmembers():
+            if requested is not None and member.name not in requested:
+                continue
+            if not _safe_member_name(member.name):
+                raise ValueError(f"Unsafe TAR member path: {member.name!r}")
+
+            target = (destination / member.name).resolve()
+            if target != destination and destination not in target.parents:
+                raise ValueError(f"Unsafe TAR member path: {member.name!r}")
+
+            if member.issym() or member.islnk():
+                print(f"Skipping TAR link member: {member.name}", file=sys.stderr)
+                continue
+            if not member.isfile() and not member.isdir():
+                print(f"Skipping unsupported TAR member: {member.name}", file=sys.stderr)
+                continue
+
+            safe_members.append(member)
+        return safe_members
 
     def extractall(self, path: str | Path | None = None, members=None, pwd=None, force: bool = False):
         """Extract safely and return the final destination directory.
@@ -223,16 +313,21 @@ class ZipperZero:
         a temporary directory, then merged into the destination. Non-empty
         destinations require `force=True`.
         """
-        destination = Path(path) if path not in [None, ""] else self.path.with_suffix("")
+        destination = (
+            Path(path) if path not in [None, ""] else _default_extract_destination(self.path)
+        )
         destination = destination.resolve()
 
-        for member in self.archive.infolist():
-            if not _safe_member_name(member.filename):
-                raise ValueError(f"Unsafe ZIP member path: {member.filename!r}")
+        if self.format == "zip":
+            for member in self.archive.infolist():
+                if not _safe_member_name(member.filename):
+                    raise ValueError(f"Unsafe ZIP member path: {member.filename!r}")
 
-            target = (destination / member.filename).resolve()
-            if target != destination and destination not in target.parents:
-                raise ValueError(f"Unsafe ZIP member path: {member.filename!r}")
+                target = (destination / member.filename).resolve()
+                if target != destination and destination not in target.parents:
+                    raise ValueError(f"Unsafe ZIP member path: {member.filename!r}")
+        else:
+            members = self._safe_tar_members(destination, members=members)
 
         if destination.exists():
             if not destination.is_dir():
@@ -243,14 +338,17 @@ class ZipperZero:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(dir=destination.parent) as tmpdir:
             staged = Path(tmpdir)
-            self.archive.extractall(staged, members=members, pwd=pwd)
+            if self.format == "zip":
+                self.archive.extractall(staged, members=members, pwd=pwd)
+            else:
+                self.archive.extractall(staged, members=members)
             _merge_extracted_tree(staged, destination)
 
         return destination
 
     @staticmethod
     def default_output(source: Path) -> Path:
-        """Return the default output ZIP path for a source file or directory."""
+        """Return the default output archive path for a source file or directory."""
         if source.is_dir():
             return source.parent / f"{source.name}.zip"
         return source.with_suffix(".zip")
@@ -263,10 +361,10 @@ class ZipperZero:
         force: bool = False,
         compress_level: int | None = None,
     ) -> Path:
-        """Create a ZIP archive from a file or directory and return its path.
+        """Create a ZIP/TAR archive from a file or directory and return its path.
 
         Directory creation preserves empty directories, includes hidden paths,
-        and skips symlinks. Existing output ZIP files require `force=True`.
+        and skips symlinks. Existing output archive files require `force=True`.
         """
         if compress_level is not None and not 0 <= compress_level <= 9:
             raise ValueError("Compression level must be an integer from 0 to 9")
@@ -278,6 +376,9 @@ class ZipperZero:
             raise ValueError("SOURCE symlinks are not supported")
 
         output = Path(output_path) if output_path not in [None, ""] else cls.default_output(source)
+        output_format = _archive_format_for_output(output)
+        if compress_level is not None and output_format == "tar":
+            raise ValueError("Compression level only applies to ZIP and TAR.GZ output")
         output.parent.mkdir(parents=True, exist_ok=True)
 
         source_resolved = source.resolve()
@@ -289,6 +390,33 @@ class ZipperZero:
                 raise ValueError(f"Output path is a directory: {output}")
             if not force:
                 raise ValueError(f"Output file already exists: {output}")
+
+        if output_format in {"tar", "tar.gz"}:
+            mode = "w:gz" if output_format == "tar.gz" else "w"
+            open_kwargs = (
+                {"compresslevel": compress_level}
+                if output_format == "tar.gz" and compress_level is not None
+                else {}
+            )
+            with tarfile.open(output, mode, **open_kwargs) as archive:
+                if source.is_file():
+                    archive.add(source, arcname=source.name, recursive=False)
+                    return output
+
+                for path in sorted(source.rglob("*")):
+                    if path.resolve() == output_resolved:
+                        continue
+                    if path.is_symlink():
+                        continue
+
+                    relative_path = path.relative_to(source).as_posix()
+                    if path.is_dir():
+                        if not any(path.iterdir()):
+                            archive.add(path, arcname=relative_path, recursive=False)
+                    elif path.is_file():
+                        archive.add(path, arcname=relative_path, recursive=False)
+
+            return output
 
         with ZipFile(output, "w", compression=ZIP_DEFLATED, compresslevel=compress_level) as archive:
             if source.is_file():
@@ -344,7 +472,7 @@ def run_mode(
 
 
 class ZipperZeroSelfTests(unittest.TestCase):
-    """Built-in tests for core ZIP create, inspect, and extract behavior."""
+    """Built-in tests for core archive create, inspect, and extract behavior."""
 
     def test_create_directory_uses_default_sibling_zip(self):
         with TemporaryDirectory() as tmpdir:
@@ -459,6 +587,42 @@ class ZipperZeroSelfTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ZipperZero.create(source, compress_level=10)
 
+    def test_create_tar_archive_from_directory(self):
+        with TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source"
+            (source / "nested").mkdir(parents=True)
+            (source / "hello.txt").write_text("hello\n")
+            (source / "nested" / "deep.txt").write_text("deep\n")
+            output = Path(tmpdir) / "out.tar"
+
+            ZipperZero.create(source, output)
+
+            with ZipperZero(output) as archive:
+                self.assertEqual(archive.test(), None)
+                self.assertEqual(sorted(archive.contents()), ["hello.txt", "nested/deep.txt"])
+
+    def test_create_tar_gz_archive_from_directory(self):
+        with TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source"
+            source.mkdir()
+            (source / "hello.txt").write_text("hello\n")
+            output = Path(tmpdir) / "out.tar.gz"
+
+            ZipperZero.create(source, output, compress_level=9)
+
+            with ZipperZero(output) as archive:
+                self.assertEqual(archive.test(), None)
+                self.assertEqual(archive.contents(), ["hello.txt"])
+
+    def test_create_rejects_compression_level_for_plain_tar(self):
+        with TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source"
+            source.mkdir()
+            output = Path(tmpdir) / "out.tar"
+
+            with self.assertRaises(ValueError):
+                ZipperZero.create(source, output, compress_level=9)
+
     def test_extract_defaults_to_archive_stem_directory(self):
         with TemporaryDirectory() as tmpdir:
             archive_path = Path(tmpdir) / "archive.zip"
@@ -484,6 +648,33 @@ class ZipperZeroSelfTests(unittest.TestCase):
 
             self.assertEqual(destination, output.resolve())
             self.assertEqual((output / "hello.txt").read_text(), "hello\n")
+
+    def test_extract_tar_archive(self):
+        with TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source"
+            source.mkdir()
+            (source / "hello.txt").write_text("hello\n")
+            archive_path = ZipperZero.create(source, Path(tmpdir) / "archive.tar")
+            output = Path(tmpdir) / "out"
+
+            with ZipperZero(archive_path) as archive:
+                destination = archive.extractall(output)
+
+            self.assertEqual(destination, output.resolve())
+            self.assertEqual((output / "hello.txt").read_text(), "hello\n")
+
+    def test_extract_tar_gz_defaults_to_archive_stem_directory(self):
+        with TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source"
+            source.mkdir()
+            (source / "hello.txt").write_text("hello\n")
+            archive_path = ZipperZero.create(source, Path(tmpdir) / "archive.tar.gz")
+
+            with ZipperZero(archive_path) as archive:
+                destination = archive.extractall()
+
+            self.assertEqual(destination, (Path(tmpdir) / "archive").resolve())
+            self.assertEqual((destination / "hello.txt").read_text(), "hello\n")
 
     def test_extract_refuses_non_empty_destination_without_force(self):
         with TemporaryDirectory() as tmpdir:
@@ -567,6 +758,65 @@ class ZipperZeroSelfTests(unittest.TestCase):
 
             self.assertFalse((destination / "ok.txt").exists())
             self.assertFalse((Path(tmpdir) / "evil.txt").exists())
+
+    def test_extract_tar_rejects_unsafe_member_before_writing_files(self):
+        with TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "bad.tar"
+            destination = Path(tmpdir) / "out"
+            with tarfile.open(archive_path, "w") as archive:
+                ok_data = b"ok"
+                ok_member = tarfile.TarInfo("ok.txt")
+                ok_member.size = len(ok_data)
+                archive.addfile(ok_member, io.BytesIO(ok_data))
+                bad_data = b"bad"
+                bad_member = tarfile.TarInfo("../evil.txt")
+                bad_member.size = len(bad_data)
+                archive.addfile(bad_member, io.BytesIO(bad_data))
+
+            with self.assertRaises(ValueError):
+                with ZipperZero(archive_path) as archive:
+                    archive.extractall(destination)
+
+            self.assertFalse((destination / "ok.txt").exists())
+            self.assertFalse((Path(tmpdir) / "evil.txt").exists())
+
+    def test_extract_tar_skips_links_with_warning(self):
+        with TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "links.tar"
+            output = Path(tmpdir) / "out"
+            with tarfile.open(archive_path, "w") as archive:
+                data = b"hello\n"
+                member = tarfile.TarInfo("hello.txt")
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+                link = tarfile.TarInfo("link.txt")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "hello.txt"
+                archive.addfile(link)
+            stderr = io.StringIO()
+
+            with ZipperZero(archive_path) as archive, redirect_stderr(stderr):
+                archive.extractall(output)
+
+            self.assertEqual((output / "hello.txt").read_text(), "hello\n")
+            self.assertFalse((output / "link.txt").exists())
+            self.assertIn("Skipping TAR link member: link.txt", stderr.getvalue())
+
+    def test_extract_tar_skips_special_members_with_warning(self):
+        with TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "special.tar"
+            output = Path(tmpdir) / "out"
+            with tarfile.open(archive_path, "w") as archive:
+                fifo = tarfile.TarInfo("named-pipe")
+                fifo.type = tarfile.FIFOTYPE
+                archive.addfile(fifo)
+            stderr = io.StringIO()
+
+            with ZipperZero(archive_path) as archive, redirect_stderr(stderr):
+                archive.extractall(output)
+
+            self.assertFalse((output / "named-pipe").exists())
+            self.assertIn("Skipping unsupported TAR member: named-pipe", stderr.getvalue())
 
     def test_self_test_flag_does_not_require_source(self):
         args = _parse_args(["--self-test"])
@@ -752,6 +1002,9 @@ def main(cmd=None) -> int:
         return 1
     except BadZipFile:
         print(f"Not a valid ZIP file: {args.source_path}", file=sys.stderr)
+        return 1
+    except tarfile.TarError:
+        print(f"Not a valid TAR file: {args.source_path}", file=sys.stderr)
         return 1
     except ValueError as error:
         print(error, file=sys.stderr)
