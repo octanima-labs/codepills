@@ -193,3 +193,46 @@ pwd | c
 
 # Terminal 2:
 cd `v`
+
+
+# ### ID: sh0012 ###
+# Title: Copy to clipboard helper
+# Description: Copy a string, piped input, or redirected input to the system clipboard.
+# Tags:
+# - bash
+# - clipboard
+# - wayland
+# - x11
+# - macos
+# Platforms:
+# - Linux
+# - macOS
+
+copy_to_clipboard() {
+    local input
+
+    if [ ! -t 0 ]; then
+        input=$(cat)
+    else
+        input=$1
+    fi
+
+    if command -v wl-copy >/dev/null 2>&1; then
+        printf '%s' "$input" | wl-copy
+    elif [ "$(uname)" = "Darwin" ] && command -v pbcopy >/dev/null 2>&1; then
+        printf '%s' "$input" | pbcopy
+    elif command -v xclip >/dev/null 2>&1; then
+        printf '%s' "$input" | xclip -selection clipboard
+    elif command -v xsel >/dev/null 2>&1; then
+        printf '%s' "$input" | xsel --clipboard --input
+    else
+        printf 'Error: no clipboard command found. Install wl-copy, pbcopy, xclip, or xsel.\n' >&2
+        return 1
+    fi
+
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -u low 'Copied to clipboard' 2>/dev/null
+    fi
+}
+
+alias c2c='copy_to_clipboard'
