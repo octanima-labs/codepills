@@ -24,6 +24,7 @@ python codepills.py search
 python codepills.py search --type snippet -t linux
 python codepills.py search --type script -t python -D
 python codepills.py get py0006
+python codepills.py get -c python/pingwave
 python codepills.py run python/pingwave --tests
 ```
 
@@ -101,15 +102,26 @@ Multiple filters use AND logic.
 
 ### Get
 
-Print one or more snippets and copy the same content to the clipboard.
+Retrieve one or more snippets or standalone scripts.
 
 ```bash
 python codepills.py get py0001
-python codepills.py get py0001 sh0001 ps0001
+python codepills.py get python/pingwave
+python codepills.py get py0001 python/pingwave
+python codepills.py get -c py0001 python/pingwave
 ```
 
-Only snippet content is printed and copied; the ID/header metadata is omitted.
-When multiple snippets are selected, they are separated by two blank lines.
+Snippet references use stable IDs such as `py0001`, `sh0001`, `ps0001`, and
+`js0001`. Script references use `<language>/<name>` with an optional extension,
+such as `python/pingwave` or `python/pingwave.py`.
+
+For snippets, `get` prints only the snippet content; the ID/header metadata is
+omitted. For scripts, `get` prints the absolute path to the resolved script
+file. When multiple entries are selected, they are separated by two blank lines.
+
+Use `-c` or `--copy` to copy retrieved content to the clipboard. Snippets copy
+the snippet content, while scripts copy the full script file content rather than
+the displayed path.
 
 Clipboard support uses platform commands when available:
 
@@ -117,7 +129,7 @@ Clipboard support uses platform commands when available:
 - macOS: `pbcopy`
 - Windows: `clip` or PowerShell `Set-Clipboard`
 
-If clipboard copy fails, the snippet content is still printed.
+If clipboard copy fails, the retrieved display output is still printed.
 
 ### Run
 

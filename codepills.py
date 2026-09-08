@@ -1015,6 +1015,34 @@ def find_snippet(snippet_id: str, root: Path) -> tuple[dict[str, object] | None,
     return matches[0], []
 
 
+def resolve_get_reference(reference: str, root: Path) -> tuple[str, str] | tuple[None, str]:
+    """Resolve a get reference into display and clipboard payloads, or an error."""
+    normalized = reference.casefold()
+    if SNIPPET_LOOKUP_PATTERN.fullmatch(normalized):
+        record, errors = find_snippet(reference, root)
+        if errors:
+            return None, errors[0]
+        if record is None:
+            return None, f"snippet not found: {normalized}"
+        content = str(record.get("content", ""))
+        return content, content
+
+    if "/" not in reference and "\\" not in reference:
+        return None, "reference must be a snippet ID or <language>/<name> script reference"
+
+    try:
+        script_path = resolve_run_script(reference, root)
+    except RunError as error:
+        return None, str(error)
+
+    try:
+        script_content = script_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return None, f"could not read {script_path.relative_to(root)}: {error}"
+
+    return str(script_path.resolve()), script_content
+
+
 def clipboard_commands() -> list[list[str]]:
     """Return platform clipboard commands in preferred order."""
     if sys.platform == "darwin":
@@ -1321,29 +1349,32 @@ def command_run(args: argparse.Namespace, root: Path) -> int:
 
 
 def command_get(args: argparse.Namespace, root: Path) -> int:
-    """Print snippets by ID and copy their combined content to the clipboard."""
-    records = []
+    """Print snippets or script paths, optionally copying retrieved content."""
+    resolved = []
     errors = []
 
-    for snippet_id in args.snippet_ids:
-        record, snippet_errors = find_snippet(snippet_id, root)
-        errors.extend(snippet_errors)
-        if record is not None:
-            records.append(record)
+    for reference in args.references:
+        display, clipboard = resolve_get_reference(reference, root)
+        if display is None:
+            errors.append(clipboard)
+        else:
+            resolved.append((display, clipboard))
 
     if errors:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)
         return 1
 
-    content = "\n\n\n".join(str(record.get("content", "")) for record in records)
-    sys.stdout.write(content)
-    if not content.endswith("\n"):
+    display_content = "\n\n\n".join(display for display, _clipboard in resolved)
+    sys.stdout.write(display_content)
+    if not display_content.endswith("\n"):
         sys.stdout.write("\n")
 
-    warning = copy_to_clipboard(content)
-    if warning:
-        print(f"warning: {warning}", file=sys.stderr)
+    if args.copy:
+        clipboard_content = "\n\n\n".join(clipboard for _display, clipboard in resolved)
+        warning = copy_to_clipboard(clipboard_content)
+        if warning:
+            print(f"warning: {warning}", file=sys.stderr)
     return 0
 
 
@@ -1430,13 +1461,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     get_parser = subparsers.add_parser(
         "get",
-        help="print a snippet by ID and copy it to the clipboard",
+        help="retrieve snippets or standalone scripts",
     )
     get_parser.add_argument(
-        "snippet_ids",
-        metavar="SNIPPET_ID",
+        "references",
+        metavar="REFERENCE",
         nargs="+",
-        help="snippet identifier like py0001, sh0001, ps0001, or js0001",
+        help="snippet ID like py0001 or script reference like python/pingwave",
+    )
+    get_parser.add_argument(
+        "-c",
+        "--copy",
+        action="store_true",
+        help="copy snippet content or script file content to the clipboard",
     )
     get_parser.set_defaults(func=command_get)
 
