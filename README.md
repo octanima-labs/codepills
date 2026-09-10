@@ -8,7 +8,7 @@ running standalone tools.
 ## Layout
 
 - `codepills.py`: repository helper CLI.
-- `python/`, `bash/`, `powershell/`, `js/`: language-specific scripts.
+- `python/`, `bash/`, `powershell/`, `javascript/`: language-specific scripts.
 - `*/snippets.*`: normalized snippet notebooks for each language.
 
 ## Quick Start
@@ -107,13 +107,15 @@ Retrieve one or more snippets or standalone scripts.
 ```bash
 python codepills.py get py0001
 python codepills.py get python/pingwave
+python codepills.py get javascript/xda
 python codepills.py get py0001 python/pingwave
-python codepills.py get -c py0001 python/pingwave
+python codepills.py get -c py0001 javascript/xda
 ```
 
 Snippet references use stable IDs such as `py0001`, `sh0001`, `ps0001`, and
 `js0001`. Script references use `<language>/<name>` with an optional extension,
-such as `python/pingwave` or `python/pingwave.py`.
+such as `python/pingwave`, `python/pingwave.py`, `javascript/xda`, or
+`javascript/xda.js`. Bare filenames such as `xda.js` are not script references.
 
 For snippets, `get` prints only the snippet content; the ID/header metadata is
 omitted. For scripts, `get` prints the absolute path to the resolved script
@@ -146,6 +148,7 @@ The script reference is `<language>/<name>` with an optional extension. Examples
 - `python/pingwave` or `python/pingwave.py`
 - `bash/swap_file` or `bash/swap_file.sh`
 - `powershell/barabara` or `powershell/barabara.ps1`
+- `javascript/xda` or `javascript/xda.js`
 
 `run` executes standalone scripts only. Snippets are not runnable through this
 command, and browser JavaScript snippets/scripts are blocked from CLI execution.
@@ -164,7 +167,7 @@ The destination directory is chosen from the file extension:
 - `.py` -> `python/`
 - `.sh` -> `bash/`
 - `.ps1` -> `powershell/`
-- `.js` -> `js/`
+- `.js` -> `javascript/`
 
 `--name` is a filename stem only; the original extension is preserved. Existing
 destination files are not overwritten.

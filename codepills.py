@@ -37,14 +37,14 @@ BEGIN_MARKER = "CODEPILLS-META-BEGIN"
 END_MARKER = "CODEPILLS-META-END"
 SCRIPT_EXTENSIONS = {".js", ".ps1", ".py", ".sh"}
 DESTINATION_DIRS = {
-    ".js": "js",
+    ".js": "javascript",
     ".ps1": "powershell",
     ".py": "python",
     ".sh": "bash",
 }
 LANGUAGE_EXTENSIONS = {
     "bash": ".sh",
-    "js": ".js",
+    "javascript": ".js",
     "powershell": ".ps1",
     "python": ".py",
 }
@@ -56,7 +56,7 @@ DEFAULT_INTERPRETERS = {
 }
 SNIPPET_FILES = {
     Path("bash/snippets.sh"): {"language": "bash", "prefix": "sh", "comment": "#"},
-    Path("js/snippets.js"): {"language": "javascript", "prefix": "js", "comment": "//"},
+    Path("javascript/snippets.js"): {"language": "javascript", "prefix": "js", "comment": "//"},
     Path("powershell/snippets.ps1"): {
         "language": "powershell",
         "prefix": "ps",
@@ -170,7 +170,7 @@ def is_ignored(path: Path, root: Path) -> bool:
         return True
     if path.name.startswith("snippets."):
         return True
-    return relative.as_posix() == "js/lib.js"
+    return relative.as_posix() == "javascript/lib.js"
 
 
 def iter_script_paths(root: Path) -> list[Path]:

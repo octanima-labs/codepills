@@ -5,7 +5,7 @@ name: hackaday-markdown
 version: 1.0.0
 author: octanima-labs
 description: Extract a Hackaday article from the browser DOM and print Markdown.
-repo: https://github.com/octanima-labs/codepills/blob/main/js/hackaday.js
+repo: https://github.com/octanima-labs/codepills/blob/main/javascript/hackaday.js
 license: MIT
 usage: Paste into a browser console on a Hackaday article page.
 tags:
