@@ -35,6 +35,8 @@ from unittest.mock import patch
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile, is_zipfile
 
+__all__ = ["ZipperZero"]
+
 
 def _safe_member_name(name: str) -> bool:
     """Return True when an archive member path is safe to extract."""

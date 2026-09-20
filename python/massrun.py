@@ -38,6 +38,19 @@ from pathlib import Path
 
 PLACEHOLDERS = ("{{TARGET}}", "{{ABS}}", "{{NAME}}", "{{STEM}}", "{{EXT}}", "{{DIR}}")
 
+__all__ = [
+    "PLACEHOLDERS",
+    "RunResult",
+    "has_placeholder",
+    "substitute_placeholders",
+    "build_argv_command",
+    "resolve_cwd",
+    "find_targets",
+    "run_for_target",
+    "run_targets",
+    "run_matching",
+]
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -206,38 +219,90 @@ def print_result(result: RunResult, quiet: bool = False, verbose: int = 0) -> No
             print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
 
 
+def run_targets(
+    command_template: str,
+    targets: list[Path],
+    *,
+    cwd: Path | None = None,
+    use_shell: bool = False,
+    dry_run: bool = False,
+    fail_fast: bool = False,
+) -> list[RunResult]:
+    """Run or preview a command template for explicit targets."""
+
+    if not has_placeholder(command_template):
+        raise ValueError("command must contain at least one supported placeholder")
+
+    base = resolve_cwd(cwd)
+    results: list[RunResult] = []
+    for target in targets:
+        resolved = (base / target).resolve() if not target.is_absolute() else target.resolve()
+        result = run_for_target(
+            resolved,
+            base,
+            command_template,
+            use_shell=use_shell,
+            dry_run=dry_run,
+        )
+        results.append(result)
+        if fail_fast and not result.succeeded:
+            break
+    return results
+
+
+def run_matching(
+    command_template: str,
+    patterns: list[str],
+    *,
+    cwd: Path | None = None,
+    recursive: bool = False,
+    use_shell: bool = False,
+    dry_run: bool = False,
+    fail_fast: bool = False,
+) -> list[RunResult]:
+    """Run or preview a command template for files matching glob patterns."""
+
+    base = resolve_cwd(cwd)
+    targets = find_targets(base, patterns, recursive=recursive)
+    return run_targets(
+        command_template,
+        targets,
+        cwd=base,
+        use_shell=use_shell,
+        dry_run=dry_run,
+        fail_fast=fail_fast,
+    )
+
+
 def run_batch(args: argparse.Namespace) -> int:
     """Run batch command processing and return a process exit code."""
 
     try:
-        cwd = resolve_cwd(args.cwd)
+        results = run_matching(
+            args.command,
+            args.targets,
+            cwd=args.cwd,
+            recursive=args.recursive,
+            use_shell=args.shell,
+            dry_run=args.dry_run,
+            fail_fast=args.fail_fast,
+        )
     except OSError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
-
-    if not has_placeholder(args.command):
-        print("Error: command must contain at least one supported placeholder", file=sys.stderr)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
         return 1
 
-    targets = find_targets(cwd, args.targets, recursive=args.recursive)
-    if not targets:
+    if not results:
         print("Error: no targets matched", file=sys.stderr)
         return 1
 
     failed = False
-    for target in targets:
-        result = run_for_target(
-            target,
-            cwd,
-            args.command,
-            use_shell=args.shell,
-            dry_run=args.dry_run,
-        )
+    for result in results:
         print_result(result, quiet=args.quiet, verbose=args.verbose)
         if not result.succeeded:
             failed = True
-            if args.fail_fast:
-                break
 
     return 1 if failed else 0
 

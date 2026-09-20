@@ -53,7 +53,6 @@ import argparse
 import http.server
 import json
 import mimetypes
-import os
 import socketserver
 import sys
 import urllib.parse
@@ -75,6 +74,30 @@ MIME_TYPES = {
     ".tif": "image/tiff", ".tiff": "image/tiff",
     ".avif": "image/avif", ".heic": "image/heic", ".heif": "image/heif",
 }
+
+__all__ = [
+    "DEFAULT_PORT",
+    "IMAGE_EXTS",
+    "MIME_TYPES",
+    "get_mime",
+    "create_server",
+    "serve",
+]
+
+
+class BrowpicServer(socketserver.ThreadingTCPServer):
+    """Threading TCP server configured for browpic request handling."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def _is_within_root(root, path):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def get_mime(path):
@@ -119,7 +142,7 @@ def send_file_data(handler, path):
     """
     try:
         resolved = (handler.server.root / path).resolve()
-        if not str(resolved).startswith(str(handler.server.root)):
+        if not _is_within_root(handler.server.root, resolved):
             handler.send_error(403)
             return
         with open(resolved, "rb") as f:
@@ -377,7 +400,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             rel_dir = qs.get("dir", [""])[0]
             target = (self.server.root / rel_dir).resolve()
-            if not str(target).startswith(str(self.server.root)):
+            if not _is_within_root(self.server.root, target):
                 send_json(self, {"error": "Access denied"}, 403)
                 return
             if not target.is_dir():
@@ -404,7 +427,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             filename = "/".join(parts[2:])
             try:
                 resolved = (self.server.root / filename).resolve()
-                if not str(resolved).startswith(str(self.server.root)):
+                if not _is_within_root(self.server.root, resolved):
                     send_json(self, {"error": "Access denied"}, 403)
                     return
                 if not resolved.is_file():
@@ -435,7 +458,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 old_path = (self.server.root / old).resolve()
                 new_path = (old_path.parent / new).resolve()
-                if not str(old_path).startswith(str(self.server.root)) or not str(new_path).startswith(str(self.server.root)):
+                if not _is_within_root(self.server.root, old_path) or not _is_within_root(self.server.root, new_path):
                     send_json(self, {"error": "Access denied"}, 403)
                     return
                 if not old_path.is_file():
@@ -488,15 +511,25 @@ def main():
     if args.tests:
         run_tests()
 
+    serve(Path.cwd(), bind=args.bind, port=args.port)
+
+
+def create_server(root=".", *, bind="", port=DEFAULT_PORT):
+    """Create a configured browpic server without starting its serve loop."""
+
     class _Handler(Handler):
         pass
 
-    server = socketserver.ThreadingTCPServer((args.bind, args.port), _Handler)
-    server.root = Path.cwd().resolve()
-    server.allow_reuse_address = True
-    server.daemon_threads = True
+    server = BrowpicServer((bind, port), _Handler)
+    server.root = Path(root).resolve()
+    return server
 
-    print(f"Serving {server.root} at http://{args.bind or 'localhost'}:{args.port}")
+
+def serve(root=".", *, bind="", port=DEFAULT_PORT):
+    """Start a browpic server and block until interrupted."""
+
+    server = create_server(root, bind=bind, port=port)
+    print(f"Serving {server.root} at http://{bind or 'localhost'}:{port}")
     print("Press Ctrl+C to stop")
 
     try:
@@ -504,7 +537,8 @@ def main():
     except KeyboardInterrupt:
         print("\nShutting down...")
         sys.stdout.flush()
-        os._exit(0)
+    finally:
+        server.server_close()
 
 
 def run_tests():
@@ -553,10 +587,7 @@ def run_tests():
             (root / 'subdir' / 'nested').mkdir()
             make_png(root / 'subdir' / 'nested' / 'deep.png')
             (root / 'empty').mkdir()
-            cls.server = socketserver.ThreadingTCPServer(('127.0.0.1', 0), _TestHandler)
-            cls.server.root = root
-            cls.server.allow_reuse_address = True
-            cls.server.daemon_threads = True
+            cls.server = create_server(root, bind='127.0.0.1', port=0)
             cls.port = cls.server.server_address[1]
             cls._thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
             cls._thread.start()

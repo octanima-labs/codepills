@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codepills"
+version = "0.1.0"
+description = "Importable Python utilities from Code Pills."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "octanima-labs" },
+]
+keywords = ["utilities", "scripts", "snippets", "stdlib"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/octanima-labs/codepills"
+Repository = "https://github.com/octanima-labs/codepills"
+
+[tool.setuptools]
+packages = ["codepills"]
+py-modules = []
+
+[tool.setuptools.package-dir]
+codepills = "python"

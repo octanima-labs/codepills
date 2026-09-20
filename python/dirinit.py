@@ -49,6 +49,14 @@ INDENT_WIDTH = 2
 TEMPLATE_HEADER_RE = re.compile(r"^---\s+(.+?)\s*$")
 VARIABLE_RE = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}")
 
+__all__ = [
+    "StructureEntry",
+    "CreatedEntry",
+    "parse_structure_file",
+    "preview_structure",
+    "create_structure",
+]
+
 
 @dataclass(frozen=True)
 class StructureEntry:

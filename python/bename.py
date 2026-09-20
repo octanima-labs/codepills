@@ -74,6 +74,14 @@ SAFE_STRING_METHODS = {
     "zfill",
 }
 
+__all__ = [
+    "RenamePlan",
+    "RenameResult",
+    "preview_renames",
+    "rename_paths",
+    "render_name",
+]
+
 
 @dataclass(frozen=True)
 class RenamePlan:

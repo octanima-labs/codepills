@@ -47,6 +47,18 @@ RESET = "\033[0m"
 REQUIRED_TEST_TARGET = "127.0.0.1"
 OPTIONAL_TEST_TARGETS = ("1.1.1.1", "8.8.8.8")
 
+__all__ = [
+    "PingResult",
+    "build_ping_command",
+    "output_shows_all_packets_lost",
+    "ping_target",
+    "ping_targets",
+    "result_line",
+    "format_file_result",
+    "format_summary",
+    "write_output_file",
+]
+
 
 @dataclass(frozen=True)
 class PingResult:
@@ -143,18 +155,32 @@ def format_summary(results: list[PingResult]) -> str:
     return f"[*] {total} targets tested: reachable {reachable}, unreachable {unreachable}"
 
 
+def ping_targets(targets: list[str], num_packets: int = 4, max_workers: int | None = None) -> list[PingResult]:
+    """Ping targets concurrently and return results without printing."""
+
+    if num_packets < 1:
+        raise ValueError("num_packets must be at least 1")
+    if not targets:
+        return []
+
+    worker_count = max_workers if max_workers is not None else min(32, len(targets))
+    if worker_count < 1:
+        raise ValueError("max_workers must be at least 1")
+
+    results: list[PingResult] = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(ping_target, target, num_packets) for target in targets]
+        for future in as_completed(futures):
+            results.append(future.result())
+    return results
+
+
 def check_targets(targets: list[str], num_packets: int, verbosity: int) -> list[PingResult]:
     """Ping targets concurrently and print each result as it completes."""
 
-    max_workers = min(32, len(targets))
-    results: list[PingResult] = []
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(ping_target, target, num_packets) for target in targets]
-        for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
-            print_result(result, verbosity)
+    results = ping_targets(targets, num_packets)
+    for result in results:
+        print_result(result, verbosity)
 
     print(format_summary(results))
     return results

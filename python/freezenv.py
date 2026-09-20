@@ -46,10 +46,104 @@ import argparse
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 
 BASE_PACKAGES = {"pip", "setuptools", "wheel", "distribute"}
 OUTPUT_FILENAME = "auto_requirements.txt"
+
+__all__ = [
+    "BASE_PACKAGES",
+    "OUTPUT_FILENAME",
+    "FreezenvError",
+    "discover_venv",
+    "find_site_packages",
+    "freeze_requirements",
+    "write_requirements",
+    "generate_requirements_from_venv",
+]
+
+
+class FreezenvError(ValueError):
+    """Raised when requirements cannot be generated from a virtual environment."""
+
+
+def discover_venv(path: str | os.PathLike[str]) -> Path:
+    """Return the venv path found at path, path/venv, or path/.venv."""
+
+    base = Path(path)
+    for name in ("", "venv", ".venv"):
+        candidate = base / name
+        if (candidate / "pyvenv.cfg").exists():
+            return candidate
+
+    raise FreezenvError("No virtual environment found at the provided path or subdirectories.")
+
+
+def find_site_packages(venv_path: str | os.PathLike[str]) -> Path:
+    """Return a platform-specific site-packages directory for a virtual environment."""
+
+    target_venv = Path(venv_path)
+    possible_site_paths = [
+        target_venv / "Lib" / "site-packages",
+        target_venv / "lib64" / "site-packages",
+    ]
+
+    lib_dir = target_venv / "lib"
+    if lib_dir.exists():
+        for item in lib_dir.iterdir():
+            if item.name.startswith("python"):
+                possible_site_paths.append(item / "site-packages")
+
+    for site_packages in possible_site_paths:
+        if site_packages.exists():
+            return site_packages
+
+    raise FreezenvError("Could not locate site-packages directory.")
+
+
+def freeze_requirements(path: str | os.PathLike[str]) -> list[str]:
+    """Return sorted requirement strings from package metadata in a venv."""
+
+    site_packages = find_site_packages(discover_venv(path))
+    dependencies = []
+
+    for folder in os.listdir(site_packages):
+        if not folder.endswith(".dist-info"):
+            continue
+
+        metadata_path = site_packages / folder / "METADATA"
+        if not metadata_path.exists():
+            continue
+
+        name = None
+        version = None
+        with metadata_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("Name:"):
+                    name = line.split(":", 1)[1].strip()
+                elif line.startswith("Version:"):
+                    version = line.split(":", 1)[1].strip()
+
+                if name and version:
+                    if name.lower() not in BASE_PACKAGES:
+                        dependencies.append(f"{name}=={version}")
+                    break
+
+    return sorted(set(dependencies), key=str.lower)
+
+
+def write_requirements(
+    path: str | os.PathLike[str],
+    requirements: list[str] | None = None,
+    output: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Write requirement strings to a file and return the output path."""
+
+    dependencies = freeze_requirements(path) if requirements is None else requirements
+    output_file = Path(output) if output is not None else Path(path) / OUTPUT_FILENAME
+    output_file.write_text("\n".join(dependencies), encoding="utf-8")
+    return output_file
 
 
 def generate_requirements_from_venv(path: str) -> list[str] | str:
@@ -72,62 +166,11 @@ def generate_requirements_from_venv(path: str) -> list[str] | str:
         A sorted list of ``name==version`` requirement strings on success.
         On failure, returns an error string beginning with ``"Error:"``.
     """
-    target_venv = None
-
-    for name in ("", "venv", ".venv"):
-        check_path = os.path.join(path, name)
-        if os.path.exists(os.path.join(check_path, "pyvenv.cfg")):
-            target_venv = check_path
-            break
-
-    if not target_venv:
-        return "Error: No virtual environment found at the provided path or subdirectories."
-
-    possible_site_paths = [
-        os.path.join(target_venv, "Lib", "site-packages"),
-        os.path.join(target_venv, "lib64", "site-packages"),
-    ]
-
-    lib_dir = os.path.join(target_venv, "lib")
-    if os.path.exists(lib_dir):
-        for item in os.listdir(lib_dir):
-            if item.startswith("python"):
-                possible_site_paths.append(os.path.join(lib_dir, item, "site-packages"))
-
-    site_packages = next((p for p in possible_site_paths if os.path.exists(p)), None)
-
-    if not site_packages:
-        return "Error: Could not locate site-packages directory."
-
-    dependencies = []
-
-    for folder in os.listdir(site_packages):
-        if not folder.endswith(".dist-info"):
-            continue
-
-        metadata_path = os.path.join(site_packages, folder, "METADATA")
-        if not os.path.exists(metadata_path):
-            continue
-
-        name = None
-        version = None
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("Name:"):
-                    name = line.split(":", 1)[1].strip()
-                elif line.startswith("Version:"):
-                    version = line.split(":", 1)[1].strip()
-
-                if name and version:
-                    if name.lower() not in BASE_PACKAGES:
-                        dependencies.append(f"{name}=={version}")
-                    break
-
-    dependencies = sorted(set(dependencies), key=str.lower)
-
-    output_file = os.path.join(path, OUTPUT_FILENAME)
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write("\n".join(dependencies))
+    try:
+        dependencies = freeze_requirements(path)
+        write_requirements(path, dependencies)
+    except FreezenvError as error:
+        return f"Error: {error}"
 
     return dependencies
 

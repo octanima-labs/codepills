@@ -28,6 +28,92 @@ python codepills.py get -c python/pingwave
 python codepills.py run python/pingwave --tests
 ```
 
+## Python Package API
+
+The PyPI package installs only the Python modules as the `codepills` import
+package. It does not install the Bash, JavaScript, or PowerShell collections as
+Python modules, and the repository helper `codepills.py` remains separate from
+the package API.
+
+```bash
+pip install codepills
+```
+
+Use module-first imports:
+
+```python
+from codepills.dirinit import create_structure, preview_structure
+from codepills.snippets import safe_filename
+from codepills.zipperzero import ZipperZero
+```
+
+The package root is intentionally minimal and does not re-export every utility.
+Documented public names are also declared in each module's `__all__`. Private
+helpers, parser builders, test helpers, and CLI internals are importable only as
+implementation details and are not stable package API.
+
+Supported first-pass imports:
+
+```python
+from codepills.dirinit import (
+    StructureEntry,
+    CreatedEntry,
+    parse_structure_file,
+    preview_structure,
+    create_structure,
+)
+from codepills.bename import (
+    RenamePlan,
+    RenameResult,
+    preview_renames,
+    rename_paths,
+    render_name,
+)
+from codepills.snippets import Cprint, cprint, safe_filename
+from codepills.pingwave import (
+    PingResult,
+    build_ping_command,
+    output_shows_all_packets_lost,
+    ping_target,
+    ping_targets,
+    result_line,
+    format_file_result,
+    format_summary,
+    write_output_file,
+)
+from codepills.massrun import (
+    PLACEHOLDERS,
+    RunResult,
+    has_placeholder,
+    substitute_placeholders,
+    build_argv_command,
+    resolve_cwd,
+    find_targets,
+    run_for_target,
+    run_targets,
+    run_matching,
+)
+from codepills.zipperzero import ZipperZero
+from codepills.freezenv import (
+    BASE_PACKAGES,
+    OUTPUT_FILENAME,
+    FreezenvError,
+    discover_venv,
+    find_site_packages,
+    freeze_requirements,
+    write_requirements,
+    generate_requirements_from_venv,
+)
+from codepills.browpic import (
+    DEFAULT_PORT,
+    IMAGE_EXTS,
+    MIME_TYPES,
+    get_mime,
+    create_server,
+    serve,
+)
+```
+
 To start a fresh Code Pills collection from this toolset:
 
 ```bash

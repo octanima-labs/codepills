@@ -168,6 +168,8 @@ def is_ignored(path: Path, root: Path) -> bool:
     relative = path.relative_to(root)
     if ".git" in relative.parts:
         return True
+    if path.name == "__init__.py":
+        return True
     if path.name.startswith("snippets."):
         return True
     return relative.as_posix() == "javascript/lib.js"

@@ -1,3 +1,6 @@
+__all__ = ["Cprint", "cprint", "safe_filename"]
+
+
 # ### ID: py0001 ###
 # Title: Input multiline values
 # Description: Read standard input until an empty line and return all entered lines.
@@ -50,7 +53,6 @@ def debug_shell():
 # Description: Render a fake terminal command and expected output for demonstrations.
 # Tags:
 # - terminal
-# - demo
 # - color
 # Platforms:
 # - Linux
@@ -58,10 +60,19 @@ def debug_shell():
 # - Windows
 
 def fake_cmd(command, params: list[str] = [], expected_output: str = ''):
-    from colorama import Fore, Style
-    import os
+    """
+    Example:
+    >>> fake_cmd(
+    >>>     command='date',
+    >>>     expected_output="miércoles, 25 de febrero de 2026 12:21:09"
+    >>> )
+
+    """
     import sys
+    import os
     
+    YELLOW='\033[93m'
+    RESET = '\033[0m'
     homepath = ''
     prefix = ''
     
@@ -73,15 +84,11 @@ def fake_cmd(command, params: list[str] = [], expected_output: str = ''):
         homepath = os.getenv('HOME')
         os.system('clear') # Clear screen
     print(
-        f"{prefix}{homepath}> {Fore.LIGHTYELLOW_EX}{command}{Style.RESET_ALL}{' '.join(params)}",
+        f"{prefix}{homepath}> {YELLOW}{command}{RESET}{' '.join(params)}",
         expected_output,
         "", "", "", 
         sep='\n\n'
     )
-fake_cmd(
-    command='date',
-    expected_output="miércoles, 25 de febrero de 2026 12:21:09"
-)
 
 
 # ### ID: py0004 ###
@@ -102,23 +109,15 @@ fake_cmd(
 
 
 # ### ID: py0005 ###
-# Title: Formatting and colored output helpers
-# Description: Normalize colon-separated text and color status-prefixed terminal messages.
+# Title: Colored output helpers
+# Description: Color status-prefixed terminal messages.
 # Tags:
-# - formatting
 # - ansi
 # - terminal
 # Platforms:
 # - Linux
 # - macOS
 # - Windows
-
-def format_req(r):
-    """Normalize length (adding space padding) then removes brackets (<>) so its easier to read"""
-    split = str(r).split(': ', maxsplit=1)
-    print(split)
-    return f"{'{: <19}{}'.format(*split)}"
-
 
 def cprint(value: str, quiet: bool = False) -> None | str:
     COLORS = {
