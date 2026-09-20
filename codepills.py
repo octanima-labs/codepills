@@ -1375,6 +1375,8 @@ def command_get(args: argparse.Namespace, root: Path) -> int:
         warning = copy_to_clipboard(clipboard_content)
         if warning:
             print(f"warning: {warning}", file=sys.stderr)
+        else:
+            print("Copied to clipboard")
     return 0
 
 
