@@ -1,12 +1,12 @@
 # CODEPILLS-META-BEGIN
 # schema: codepills.tool/v1
 # name: dirinit
-# version: 1.0.0
+# version: 1.1.0
 # author: octanima-labs
-# description: Create directory and dummy-file structures from an indented text specification.
+# description: Create directory and file structures from an indented text specification with optional templates.
 # repo: https://github.com/octanima-labs/codepills/blob/main/python/dirinit.py
 # license: MIT
-# usage: python python/dirinit.py PATH [--root-dir PATH] [--force]
+# usage: python python/dirinit.py PATH [--root-dir PATH] [--force] [--vars "KEY=VALUE ..."]
 # tags:
 #   - python
 #   - cli
@@ -20,27 +20,34 @@
 #   - Windows
 # CODEPILLS-META-END
 
-"""Create directory and dummy-file structures from a text specification.
+"""Create directory and file structures from a text specification.
 
 ``dirinit`` accepts a plain text file that describes directories and files using
 two-space indentation, slash-separated paths, or a mix of both. Directory entries
-must end with ``/``. File entries are created with ``TEMPLATE FILE`` as their
-contents.
+must end with ``/``. After the hierarchy, optional ``--- PATH`` template sections
+can define file contents. Templates may use dotted placeholders such as
+``{{ project.name }}``, supplied through the CLI or API as nested variables.
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import io
 import os
 import re
+import shlex
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 
 TEMPLATE_FILE_CONTENT = "TEMPLATE FILE"
 INDENT_WIDTH = 2
+TEMPLATE_HEADER_RE = re.compile(r"^---\s+(.+?)\s*$")
+VARIABLE_RE = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}")
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,19 @@ class CreatedEntry:
 
 
 @dataclass(frozen=True)
+class _FileTemplate:
+    selector: str
+    content: str
+    line_number: int
+
+
+@dataclass(frozen=True)
+class _ParsedSpec:
+    entries: list[StructureEntry]
+    templates: list[_FileTemplate]
+
+
+@dataclass(frozen=True)
 class _Operation:
     relative_path: Path
     is_dir: bool
@@ -80,50 +100,103 @@ def parse_structure_file(path: str | os.PathLike[str]) -> list[StructureEntry]:
     structure-root marker, not a filesystem absolute path.
     """
 
+    return _parse_spec_file(path).entries
+
+
+def _parse_spec_file(path: str | os.PathLike[str]) -> _ParsedSpec:
     spec_path = _absolute_path(path)
-    entries: list[StructureEntry] = []
-    directory_stack: dict[int, tuple[str, ...]] = {}
+    hierarchy_lines, templates = _split_spec_sections(spec_path)
+
+    entries = _parse_structure_lines(hierarchy_lines)
+    _validate_templates(templates)
+    return _ParsedSpec(entries=entries, templates=templates)
+
+
+def _split_spec_sections(spec_path: Path) -> tuple[list[tuple[int, str]], list[_FileTemplate]]:
+    hierarchy_lines: list[tuple[int, str]] = []
+    templates: list[_FileTemplate] = []
+    current_selector: str | None = None
+    current_line_number = 0
+    current_content: list[str] = []
+
+    def finish_template() -> None:
+        nonlocal current_selector, current_line_number, current_content
+        if current_selector is not None:
+            templates.append(
+                _FileTemplate(
+                    selector=current_selector,
+                    content="".join(current_content).rstrip("\n\r"),
+                    line_number=current_line_number,
+                )
+            )
+        current_selector = None
+        current_line_number = 0
+        current_content = []
 
     with spec_path.open("r", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
-            line = raw_line.rstrip("\n\r").rstrip()
-            if not line.strip() or line.lstrip(" ").startswith("#"):
+            line = raw_line.rstrip("\n\r")
+            header_match = TEMPLATE_HEADER_RE.match(line)
+            if header_match:
+                finish_template()
+                current_selector = header_match.group(1)
+                current_line_number = line_number
+                current_content = []
                 continue
-            if "\t" in line:
-                raise ValueError(f"line {line_number}: indentation must use spaces, not tabs")
-
-            indent_spaces = len(line) - len(line.lstrip(" "))
-            if indent_spaces % INDENT_WIDTH:
-                raise ValueError(f"line {line_number}: indentation must use multiples of two spaces")
-            depth = indent_spaces // INDENT_WIDTH
-            text = line[indent_spaces:]
-
-            parts, is_dir, rooted = _parse_entry_text(text, line_number)
-            if rooted:
-                relative_parts = parts
+            if current_selector is None and line == "---":
+                raise ValueError(f"line {line_number}: template header requires a selector path")
+            if current_selector is None:
+                hierarchy_lines.append((line_number, raw_line))
             else:
-                if depth == 0:
-                    parent_parts: tuple[str, ...] = ()
-                else:
-                    parent_parts = directory_stack.get(depth - 1, ())
-                    if not parent_parts:
-                        raise ValueError(f"line {line_number}: indented entry has no parent directory")
-                relative_parts = (*parent_parts, *parts)
+                current_content.append(raw_line)
 
-            for stale_depth in [stack_depth for stack_depth in directory_stack if stack_depth >= depth]:
-                del directory_stack[stale_depth]
+    finish_template()
+    return hierarchy_lines, templates
 
-            if is_dir:
-                directory_stack[depth] = relative_parts
 
-            entries.append(
-                StructureEntry(
-                    line_number=line_number,
-                    raw=text,
-                    relative_path=Path(*relative_parts),
-                    is_dir=is_dir,
-                )
+def _parse_structure_lines(lines: list[tuple[int, str]]) -> list[StructureEntry]:
+    entries: list[StructureEntry] = []
+    directory_stack: dict[int, tuple[str, ...]] = {}
+
+    for line_number, raw_line in lines:
+        line = raw_line.rstrip("\n\r").rstrip()
+        if not line.strip() or line.lstrip(" ").startswith("#"):
+            continue
+        if "\t" in line:
+            raise ValueError(f"line {line_number}: indentation must use spaces, not tabs")
+
+        indent_spaces = len(line) - len(line.lstrip(" "))
+        if indent_spaces % INDENT_WIDTH:
+            raise ValueError(f"line {line_number}: indentation must use multiples of two spaces")
+        depth = indent_spaces // INDENT_WIDTH
+        text = line[indent_spaces:]
+
+        parts, is_dir, rooted = _parse_entry_text(text, line_number)
+        if rooted:
+            relative_parts = parts
+        else:
+            if depth == 0:
+                parent_parts: tuple[str, ...] = ()
+            else:
+                parent_parts = directory_stack.get(depth - 1, ())
+                if not parent_parts:
+                    raise ValueError(f"line {line_number}: indented entry has no parent directory")
+            relative_parts = (*parent_parts, *parts)
+
+        for stale_depth in [stack_depth for stack_depth in directory_stack if stack_depth >= depth]:
+            del directory_stack[stale_depth]
+
+        if is_dir:
+            directory_stack[depth] = relative_parts
+
+        entries.append(
+            StructureEntry(
+                line_number=line_number,
+                raw=text,
+                relative_path=Path(*relative_parts),
+                is_dir=is_dir,
             )
+        )
 
     _validate_entries(entries)
     return entries
@@ -145,6 +218,8 @@ def create_structure(
     path: str | os.PathLike[str],
     root_dir: str | os.PathLike[str] | None = None,
     force: bool = False,
+    variables: dict[str, object] | None = None,
+    warning_stream: TextIO | None = sys.stderr,
 ) -> list[CreatedEntry]:
     """Create a directory and file structure from ``path``.
 
@@ -153,12 +228,17 @@ def create_structure(
         root_dir: Optional creation base. Defaults to the spec file's parent.
         force: Skip existing paths instead of failing, after validating the full
             plan for malformed paths and type conflicts.
+        variables: Optional nested dictionary for ``{{ dotted.key }}`` template
+            placeholders.
     """
 
-    entries = parse_structure_file(path)
+    parsed = _parse_spec_file(path)
+    entries = parsed.entries
     base_dir = _base_dir(path, root_dir)
     operations = _build_operations(entries)
     _preflight_operations(operations, base_dir, force=force)
+    template_root = _template_root(entries)
+    missing_variables: set[str] = set()
 
     if base_dir.exists() and not base_dir.is_dir():
         raise ValueError(f"root directory is not a directory: {base_dir}")
@@ -183,7 +263,8 @@ def create_structure(
             target.mkdir()
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(TEMPLATE_FILE_CONTENT, encoding="utf-8")
+            content = _content_for_file(operation.relative_path, template_root, parsed.templates, variables or {}, missing_variables)
+            target.write_text(content, encoding="utf-8")
 
         results.append(
             CreatedEntry(
@@ -194,6 +275,10 @@ def create_structure(
                 explicit=operation.explicit,
             )
         )
+
+    if warning_stream is not None:
+        for variable_name in sorted(missing_variables):
+            print(f"var {variable_name} not provided", file=warning_stream)
 
     return results
 
@@ -237,6 +322,146 @@ def _parse_entry_text(text: str, line_number: int) -> tuple[tuple[str, ...], boo
             raise ValueError(f"line {line_number}: drive-like path components are not allowed")
 
     return parts, is_dir, rooted
+
+
+def _validate_templates(templates: list[_FileTemplate]) -> None:
+    seen: dict[str, _FileTemplate] = {}
+    for template in templates:
+        selector = template.selector
+        if selector == "---" or not selector.strip():
+            raise ValueError(f"line {template.line_number}: template header requires a selector path")
+        if selector.startswith("/"):
+            raise ValueError(f"line {template.line_number}: template selector must be relative: {selector}")
+        if selector.endswith("/"):
+            raise ValueError(f"line {template.line_number}: template selector must target a file: {selector}")
+        if "\\" in selector:
+            raise ValueError(f"line {template.line_number}: use '/' path separators in template selectors")
+        if re.match(r"^[A-Za-z]:", selector):
+            raise ValueError(f"line {template.line_number}: Windows drive paths are not allowed in template selectors")
+
+        parts = selector.split("/")
+        if any(part == "" for part in parts):
+            raise ValueError(f"line {template.line_number}: empty selector components are not allowed")
+        for part in parts:
+            if part in {".", ".."}:
+                raise ValueError(f"line {template.line_number}: unsafe template selector component: {part}")
+            if "\x00" in part:
+                raise ValueError(f"line {template.line_number}: null bytes are not allowed in template selectors")
+            if ":" in part:
+                raise ValueError(f"line {template.line_number}: drive-like selector components are not allowed")
+
+        key = selector.casefold()
+        previous = seen.get(key)
+        if previous is not None:
+            raise ValueError(
+                f"line {template.line_number}: duplicate template selector also declared on line "
+                f"{previous.line_number}: {selector}"
+            )
+        seen[key] = template
+
+
+def _template_root(entries: list[StructureEntry]) -> tuple[str, ...]:
+    top_level = {entry.relative_path.parts[0] for entry in entries if entry.relative_path.parts}
+    if len(top_level) != 1:
+        return ()
+    root = next(iter(top_level))
+    if any(entry.relative_path == Path(root) and entry.is_dir for entry in entries):
+        return (root,)
+    return ()
+
+
+def _content_for_file(
+    relative_path: Path,
+    template_root: tuple[str, ...],
+    templates: list[_FileTemplate],
+    variables: dict[str, object],
+    missing_variables: set[str],
+) -> str:
+    template = _select_template(relative_path, template_root, templates)
+    if template is None:
+        return TEMPLATE_FILE_CONTENT
+    return _render_template(template.content, variables, missing_variables)
+
+
+def _select_template(relative_path: Path, template_root: tuple[str, ...], templates: list[_FileTemplate]) -> _FileTemplate | None:
+    if not templates:
+        return None
+
+    match_path = _template_match_path(relative_path, template_root)
+    matches = [template for template in templates if fnmatch.fnmatchcase(match_path, template.selector)]
+    if not matches:
+        return None
+    return max(matches, key=lambda template: _selector_specificity(template.selector))
+
+
+def _template_match_path(relative_path: Path, template_root: tuple[str, ...]) -> str:
+    parts = relative_path.parts
+    if template_root and parts[: len(template_root)] == template_root and len(parts) > len(template_root):
+        parts = parts[len(template_root) :]
+    return Path(*parts).as_posix()
+
+
+def _selector_specificity(selector: str) -> tuple[int, int, int]:
+    wildcard_count = selector.count("*") + selector.count("?") + selector.count("[")
+    return (0 if wildcard_count else 1, -wildcard_count, len(selector.replace("*", "").replace("?", "")))
+
+
+def _render_template(content: str, variables: dict[str, object], missing_variables: set[str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        variable_name = match.group(1)
+        value = _resolve_variable(variable_name, variables)
+        if value is None:
+            missing_variables.add(variable_name)
+            return ""
+        return str(value)
+
+    return VARIABLE_RE.sub(replace, content)
+
+
+def _resolve_variable(variable_name: str, variables: dict[str, object]) -> object | None:
+    current: object = variables
+    for part in variable_name.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _parse_vars(raw_vars: str | None) -> dict[str, object]:
+    parsed: dict[str, object] = {}
+    if not raw_vars:
+        return parsed
+
+    for token in shlex.split(raw_vars):
+        if "=" not in token:
+            raise ValueError(f"variable assignment must use KEY=VALUE: {token}")
+        key, value = token.split("=", 1)
+        _assign_variable(parsed, key, value)
+    return parsed
+
+
+def _assign_variable(variables: dict[str, object], key: str, value: str) -> None:
+    parts = key.split(".")
+    if any(part == "" for part in parts):
+        raise ValueError(f"variable key contains an empty path segment: {key}")
+
+    current = variables
+    for part in parts[:-1]:
+        existing = current.get(part)
+        if existing is None:
+            nested: dict[str, object] = {}
+            current[part] = nested
+            current = nested
+            continue
+        if not isinstance(existing, dict):
+            raise ValueError(f"variable assignment conflicts with scalar path: {key}")
+        current = existing
+
+    leaf = parts[-1]
+    existing_leaf = current.get(leaf)
+    if isinstance(existing_leaf, dict):
+        raise ValueError(f"variable assignment conflicts with nested path: {key}")
+    current[leaf] = value
 
 
 def _validate_entries(entries: list[StructureEntry]) -> None:
@@ -333,18 +558,23 @@ def _is_within_base(base_dir: Path, target: Path) -> bool:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dirinit",
-        description="Create directories and TEMPLATE FILE placeholders from a text structure file.",
+        description="Create directories and files from a text structure file with optional templates.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
             "  dirinit structure.txt\n"
             "  dirinit structure.txt --root-dir /tmp/project\n"
             "  dirinit structure.txt --force\n"
+            "  dirinit structure.txt --vars \"project.name=Demo description='Hello world'\"\n"
             "\n"
             "syntax:\n"
             "  root/              # directories end with /\n"
             "    file.txt         # files do not end with /\n"
-            "  /root/dir/file.txt # leading / is a spec-root marker"
+            "  /root/dir/file.txt # leading / is a spec-root marker\n"
+            "\n"
+            "templates:\n"
+            "  --- */README.md   # template headers require a selector\n"
+            "  # {{ project.name }}"
         ),
     )
     parser.add_argument("path", nargs="?", type=Path, help="text structure file")
@@ -359,6 +589,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="skip existing paths and create missing paths after preflight validation",
+    )
+    parser.add_argument(
+        "--vars",
+        metavar="ASSIGNMENTS",
+        help="template variables as shell-style KEY=VALUE tokens; dotted keys create nested values",
     )
     parser.add_argument(
         "--self-test",
@@ -379,7 +614,8 @@ def _main(argv: list[str] | None = None) -> int:
         parser.error("PATH is required unless --self-test is used")
 
     try:
-        results = create_structure(args.path, root_dir=args.root_dir, force=args.force)
+        variables = _parse_vars(args.vars)
+        results = create_structure(args.path, root_dir=args.root_dir, force=args.force, variables=variables)
     except (FileNotFoundError, FileExistsError, OSError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -510,6 +746,119 @@ root/
                 pass
             else:
                 raise AssertionError(f"expected unsafe spec error for {filename}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        spec = base / "templates.txt"
+        _write_spec(
+            spec,
+            """
+root/
+  cat/
+    README.md
+    file.txt
+    exact.txt
+    missing.txt
+    plain.bin
+  cat2/
+    README.md
+    file.txt
+  README.md
+
+--- */file.txt
+Some text {{ var.subvar.name }} blabla
+
+--- */README.md
+# {{ category_name }}
+
+{{ category_description }}
+
+---
+
+--- README.md
+# {{ root }}
+
+{{ description }}
+
+--- cat/exact.txt
+Exact wins
+
+--- */exact.txt
+Wildcard loses
+
+--- */missing.txt
+{{ missing.value }}
+""",
+        )
+        warnings = io.StringIO()
+        create_structure(
+            spec,
+            variables={
+                "var": {"subvar": {"name": "Name"}},
+                "category_name": "Category",
+                "category_description": "Description",
+                "root": "Root",
+                "description": "Root description",
+            },
+            warning_stream=warnings,
+        )
+        assert (base / "root" / "cat" / "file.txt").read_text(encoding="utf-8") == "Some text Name blabla"
+        assert (base / "root" / "cat2" / "file.txt").read_text(encoding="utf-8") == "Some text Name blabla"
+        assert (base / "root" / "README.md").read_text(encoding="utf-8") == "# Root\n\nRoot description"
+        assert (base / "root" / "cat" / "README.md").read_text(encoding="utf-8") == "# Category\n\nDescription\n\n---"
+        assert (base / "root" / "cat" / "exact.txt").read_text(encoding="utf-8") == "Exact wins"
+        assert (base / "root" / "cat" / "missing.txt").read_text(encoding="utf-8") == ""
+        assert (base / "root" / "cat" / "plain.bin").read_text(encoding="utf-8") == TEMPLATE_FILE_CONTENT
+        assert warnings.getvalue() == "var missing.value not provided\n"
+        entries = parse_structure_file(spec)
+        assert all(entry.raw != "--- */file.txt" for entry in entries)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        spec = base / "multi-root.txt"
+        _write_spec(
+            spec,
+            """
+root1/
+  README.md
+root2/
+  README.md
+
+--- README.md
+Base README
+
+--- root1/README.md
+Root 1 README
+""",
+        )
+        create_structure(spec)
+        assert (base / "root1" / "README.md").read_text(encoding="utf-8") == "Root 1 README"
+        assert (base / "root2" / "README.md").read_text(encoding="utf-8") == TEMPLATE_FILE_CONTENT
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        for filename, (content, expected) in {
+            "empty-template.txt": ("root/\n  file.txt\n\n---\n", "template header requires a selector path"),
+            "duplicate-template.txt": ("root/\n  file.txt\n\n--- file.txt\none\n--- file.txt\ntwo\n", "duplicate template selector"),
+        }.items():
+            spec = base / filename
+            _write_spec(spec, content)
+            try:
+                create_structure(spec)
+            except ValueError as error:
+                assert expected in str(error)
+            else:
+                raise AssertionError(f"expected template error for {filename}")
+
+    assert _parse_vars("category.name=Docs root=Project") == {"category": {"name": "Docs"}, "root": "Project"}
+    assert _parse_vars("description='Hello world'") == {"description": "Hello world"}
+    for raw_vars in ("a=1 a.b=2", "a.b=2 a=1"):
+        try:
+            _parse_vars(raw_vars)
+        except ValueError as error:
+            assert "conflicts" in str(error)
+        else:
+            raise AssertionError(f"expected variable conflict for {raw_vars}")
 
     print("dirinit self-tests passed")
     return True
