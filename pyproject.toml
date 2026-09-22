@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codepills"
-version = "0.1.0"
-description = "Importable Python utilities from Code Pills."
+version = "0.2.0"
+description = "Importable Python utilities from codepills."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
