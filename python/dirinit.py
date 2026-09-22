@@ -1,9 +1,9 @@
 # CODEPILLS-META-BEGIN
 # schema: codepills.tool/v1
 # name: dirinit
-# version: 1.1.0
+# version: 1.2.0
 # author: octanima-labs
-# description: Create directory and file structures from an indented text specification with optional templates.
+# description: Create directory and file structures from a simple file with optional templates.
 # repo: https://github.com/octanima-labs/codepills/blob/main/python/dirinit.py
 # license: MIT
 # usage: python python/dirinit.py PATH [--root-dir PATH] [--force] [--vars "KEY=VALUE ..."]
@@ -14,19 +14,59 @@
 #   - scaffold
 # requires:
 #   - Python standard library
+#   - Jinja
 # platforms:
 #   - Linux
 #   - macOS
 #   - Windows
 # CODEPILLS-META-END
 
-"""Create directory and file structures from a text specification.
+"""Create directories and starter files from a compact text specification.
 
-``dirinit`` accepts a plain text file that describes directories and files using
-two-space indentation, slash-separated paths, or a mix of both. Directory entries
-must end with ``/``. After the hierarchy, optional ``--- PATH`` template sections
-can define file contents. Templates may use dotted placeholders such as
-``{{ project.name }}``, supplied through the CLI or API as nested variables.
+``dirinit`` is usable as both a CLI and a small library. It reads a plain text
+structure file, validates that every target stays within the output root, then
+creates the described directories and files. Directory entries end with ``/``;
+file entries do not. Paths can be written with two-space indentation,
+slash-separated paths, or a mix of both::
+
+    project/
+      README.md
+      src/
+        app.py
+    /project/tests/test_app.py
+
+Files receive ``TEMPLATE FILE`` unless a matching template section appears after
+the hierarchy. Template sections start with ``--- SELECTOR`` where ``SELECTOR``
+matches generated file paths. In a single-root structure, selectors are matched
+relative to that root, so ``README.md`` matches ``project/README.md``::
+
+    project/
+      README.md
+      src/app.py
+
+    --- README.md
+    # {{ project.name }}
+
+    {{ project.description }}
+
+    --- src/*.py
+    # Module for {{ project.name }}
+
+Variables are supplied through ``--vars`` on the CLI or the ``variables``
+argument in the Python API. Simple dotted placeholders such as
+``{{ project.name }}`` render without third-party dependencies. If a template
+uses Jinja-specific syntax and Jinja2 is importable, that template is rendered
+with Jinja2::
+
+    --- README.md
+    # {{ project.name | title }}
+
+    {% if project.description %}
+    {{ project.description }}
+    {% endif %}
+
+When Jinja2 is unavailable, ``dirinit`` warns once per create call, replaces
+only simple dotted placeholders, and leaves other Jinja syntax unchanged.
 """
 
 from __future__ import annotations
@@ -43,11 +83,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+try:
+    from jinja2 import Environment as _JINJA_ENVIRONMENT_CLASS
+except ImportError:  # pragma: no cover - depends on optional local package
+    _JINJA_ENVIRONMENT_CLASS = None
+
 
 TEMPLATE_FILE_CONTENT = "TEMPLATE FILE"
 INDENT_WIDTH = 2
 TEMPLATE_HEADER_RE = re.compile(r"^---\s+(.+?)\s*$")
 VARIABLE_RE = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}")
+JINJA_VARIABLE_TAG_RE = re.compile(r"{{-?.*?-?}}", re.DOTALL)
+JINJA_FALLBACK_WARNING = (
+    "Jinja template syntax found, but Jinja2 is not importable; "
+    "falling back to simple {{ dotted.name }} replacement"
+)
 
 __all__ = [
     "StructureEntry",
@@ -60,7 +110,14 @@ __all__ = [
 
 @dataclass(frozen=True)
 class StructureEntry:
-    """One explicit entry parsed from a dirinit specification file."""
+    """One explicit path entry parsed from a structure file.
+
+    Attributes:
+        line_number: One-based source line number for diagnostics.
+        raw: Entry text after indentation is removed, before path normalization.
+        relative_path: Normalized path relative to the output root.
+        is_dir: Whether the entry describes a directory.
+    """
 
     line_number: int
     raw: str
@@ -70,7 +127,17 @@ class StructureEntry:
 
 @dataclass(frozen=True)
 class CreatedEntry:
-    """One path considered during structure creation."""
+    """Result for one path considered during structure creation.
+
+    Attributes:
+        target: Absolute filesystem path that was considered.
+        is_dir: Whether the target is a directory.
+        created: Whether ``dirinit`` created this target during the call.
+        skipped: Whether an existing target was left in place because
+            ``force=True`` was used.
+        explicit: Whether the path was listed explicitly in the structure file,
+            rather than inferred as a parent directory.
+    """
 
     target: Path
     is_dir: bool
@@ -106,6 +173,18 @@ def parse_structure_file(path: str | os.PathLike[str]) -> list[StructureEntry]:
     Blank lines and lines whose first non-space character is ``#`` are ignored.
     Indentation must use exactly two spaces per level. A leading ``/`` is a
     structure-root marker, not a filesystem absolute path.
+
+    Args:
+        path: Structure specification file to parse.
+
+    Returns:
+        Explicit entries from the hierarchy section in source order. Template
+        sections are validated but are not included in the returned list.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+        ValueError: If indentation, paths, duplicate entries, or template
+            headers are invalid.
     """
 
     return _parse_spec_file(path).entries
@@ -213,7 +292,26 @@ def _parse_structure_lines(lines: list[tuple[int, str]]) -> list[StructureEntry]
 def preview_structure(
     path: str | os.PathLike[str], root_dir: str | os.PathLike[str] | None = None
 ) -> list[StructureEntry]:
-    """Parse and preflight a structure file without creating anything."""
+    """Parse and preflight a structure file without creating anything.
+
+    ``preview_structure`` performs the same path normalization and filesystem
+    conflict checks as ``create_structure`` with ``force=False``, but it never
+    creates directories or files.
+
+    Args:
+        path: Structure specification file to parse.
+        root_dir: Optional output root. Defaults to the specification file's
+            parent directory.
+
+    Returns:
+        Explicit parsed entries from the hierarchy section.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+        FileExistsError: If a planned target already exists.
+        ValueError: If the specification is invalid, a target escapes the output
+            root, or the output root is not a directory.
+    """
 
     entries = parse_structure_file(path)
     base_dir = _base_dir(path, root_dir)
@@ -231,6 +329,11 @@ def create_structure(
 ) -> list[CreatedEntry]:
     """Create a directory and file structure from ``path``.
 
+    Creation is planned and preflighted before anything is written. Parent
+    directories inferred from file paths are included in the returned results,
+    and existing targets are rejected unless ``force=True``. Template content is
+    selected per generated file after the path plan is validated.
+
     Args:
         path: Text specification file.
         root_dir: Optional creation base. Defaults to the spec file's parent.
@@ -238,6 +341,23 @@ def create_structure(
             plan for malformed paths and type conflicts.
         variables: Optional nested dictionary for ``{{ dotted.key }}`` template
             placeholders.
+        warning_stream: Stream for missing-variable and Jinja-fallback warnings.
+            Pass ``None`` to suppress warnings.
+
+    Returns:
+        Creation results for explicit entries and inferred parent directories.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+        FileExistsError: If a planned target already exists and ``force`` is
+            false.
+        OSError: If filesystem creation or file writing fails.
+        ValueError: If the specification, output root, template selector, or
+            Jinja rendering is invalid.
+
+    Example:
+        >>> create_structure("project.txt", variables={"project": {"name": "Demo"}})
+        [...]
     """
 
     parsed = _parse_spec_file(path)
@@ -247,6 +367,7 @@ def create_structure(
     _preflight_operations(operations, base_dir, force=force)
     template_root = _template_root(entries)
     missing_variables: set[str] = set()
+    jinja_fallback_used = False
 
     if base_dir.exists() and not base_dir.is_dir():
         raise ValueError(f"root directory is not a directory: {base_dir}")
@@ -271,7 +392,14 @@ def create_structure(
             target.mkdir()
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            content = _content_for_file(operation.relative_path, template_root, parsed.templates, variables or {}, missing_variables)
+            content, used_jinja_fallback = _content_for_file(
+                operation.relative_path,
+                template_root,
+                parsed.templates,
+                variables or {},
+                missing_variables,
+            )
+            jinja_fallback_used = jinja_fallback_used or used_jinja_fallback
             target.write_text(content, encoding="utf-8")
 
         results.append(
@@ -285,6 +413,8 @@ def create_structure(
         )
 
     if warning_stream is not None:
+        if jinja_fallback_used:
+            print(f"Warning: {JINJA_FALLBACK_WARNING}", file=warning_stream)
         for variable_name in sorted(missing_variables):
             print(f"var {variable_name} not provided", file=warning_stream)
 
@@ -384,10 +514,10 @@ def _content_for_file(
     templates: list[_FileTemplate],
     variables: dict[str, object],
     missing_variables: set[str],
-) -> str:
+) -> tuple[str, bool]:
     template = _select_template(relative_path, template_root, templates)
     if template is None:
-        return TEMPLATE_FILE_CONTENT
+        return TEMPLATE_FILE_CONTENT, False
     return _render_template(template.content, variables, missing_variables)
 
 
@@ -414,7 +544,33 @@ def _selector_specificity(selector: str) -> tuple[int, int, int]:
     return (0 if wildcard_count else 1, -wildcard_count, len(selector.replace("*", "").replace("?", "")))
 
 
-def _render_template(content: str, variables: dict[str, object], missing_variables: set[str]) -> str:
+def _render_template(content: str, variables: dict[str, object], missing_variables: set[str]) -> tuple[str, bool]:
+    if _has_jinja_specific_syntax(content):
+        if _JINJA_ENVIRONMENT_CLASS is not None:
+            return _render_jinja_template(content, variables), False
+        return _render_simple_template(content, variables, missing_variables), True
+    return _render_simple_template(content, variables, missing_variables), False
+
+
+def _has_jinja_specific_syntax(content: str) -> bool:
+    if re.search(r"{[%#]-?.*?-?[%#]}", content, re.DOTALL):
+        return True
+
+    for match in JINJA_VARIABLE_TAG_RE.finditer(content):
+        if VARIABLE_RE.fullmatch(match.group(0)) is None:
+            return True
+    return False
+
+
+def _render_jinja_template(content: str, variables: dict[str, object]) -> str:
+    try:
+        environment = _JINJA_ENVIRONMENT_CLASS()
+        return environment.from_string(content).render(**variables)
+    except Exception as error:
+        raise ValueError(f"failed to render Jinja template: {error}") from error
+
+
+def _render_simple_template(content: str, variables: dict[str, object], missing_variables: set[str]) -> str:
     def replace(match: re.Match[str]) -> str:
         variable_name = match.group(1)
         value = _resolve_variable(variable_name, variables)
@@ -582,7 +738,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "\n"
             "templates:\n"
             "  --- */README.md   # template headers require a selector\n"
-            "  # {{ project.name }}"
+            "  # {{ project.name }}\n"
+            "  {% if description %}{{ description }}{% endif %}  # optional Jinja2"
         ),
     )
     parser.add_argument("path", nargs="?", type=Path, help="text structure file")
@@ -640,6 +797,8 @@ def _write_spec(path: Path, content: str) -> None:
 
 
 def _run_tests() -> bool:
+    global _JINJA_ENVIRONMENT_CLASS
+
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
         spec = base / "tree.txt"
@@ -842,6 +1001,57 @@ Root 1 README
         create_structure(spec)
         assert (base / "root1" / "README.md").read_text(encoding="utf-8") == "Root 1 README"
         assert (base / "root2" / "README.md").read_text(encoding="utf-8") == TEMPLATE_FILE_CONTENT
+
+    if _JINJA_ENVIRONMENT_CLASS is not None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            spec = base / "jinja.txt"
+            _write_spec(
+                spec,
+                """
+root/
+  README.md
+
+--- README.md
+{% if project.description %}# {{ project.name | upper }}
+{{ project.description }}{% endif %}
+""",
+            )
+            create_structure(
+                spec,
+                variables={"project": {"name": "demo", "description": "Generated with Jinja"}},
+                warning_stream=io.StringIO(),
+            )
+            assert (base / "root" / "README.md").read_text(encoding="utf-8") == "# DEMO\nGenerated with Jinja"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        spec = base / "jinja-fallback.txt"
+        _write_spec(
+            spec,
+            """
+root/
+  one.txt
+  two.txt
+
+--- *.txt
+{% if project.description %}
+# {{ project.name }}
+{{ project.name | upper }}
+{% endif %}
+""",
+        )
+        original_jinja_environment_class = _JINJA_ENVIRONMENT_CLASS
+        _JINJA_ENVIRONMENT_CLASS = None
+        try:
+            warnings = io.StringIO()
+            create_structure(spec, variables={"project": {"name": "Demo"}}, warning_stream=warnings)
+        finally:
+            _JINJA_ENVIRONMENT_CLASS = original_jinja_environment_class
+        expected = "{% if project.description %}\n# Demo\n{{ project.name | upper }}\n{% endif %}"
+        assert (base / "root" / "one.txt").read_text(encoding="utf-8") == expected
+        assert (base / "root" / "two.txt").read_text(encoding="utf-8") == expected
+        assert warnings.getvalue() == f"Warning: {JINJA_FALLBACK_WARNING}\n"
 
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
