@@ -1,11 +1,11 @@
 /*
 CODEPILLS-META-BEGIN
 schema: codepills.tool/v1
-name: chato-export
-version: 1.14.0
+name: xatport
+version: 1.15.0
 author: octanima-labs
 description: Export ChatGPT conversations to markdown
-repo: https://github.com/octanima-labs/codepills/blob/main/javascript/chato-export.js
+repo: https://github.com/octanima-labs/codepills/blob/main/javascript/xatport.js
 license: MIT
 usage: Paste into a browser console on a conversation page.
 tags:
@@ -19,7 +19,7 @@ platforms:
 CODEPILLS-META-END
 */
 
-globalThis.chatoExport = globalThis.chatoExport || (() => {
+globalThis.xatport = globalThis.xatport || (() => {
 
 async function getConversation(){
     const DEBUG = true;
@@ -550,4 +550,4 @@ return {
 };
 })();
 
-globalThis.chatoExport.main();
+globalThis.xatport.main();
