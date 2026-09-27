@@ -2,7 +2,7 @@
 CODEPILLS-META-BEGIN
 schema: codepills.tool/v1
 name: mdtools
-version: 0.3.0
+version: 0.4.0
 author: octanima-labs
 description: Convert browser DOM content to Markdown
 repo: https://github.com/octanima-labs/codepills/blob/main/javascript/mdtools.js
@@ -15,6 +15,7 @@ tags:
   - markdown
 requires:
   - browser DOM
+  - clipboard.js
 platforms:
   - browser
 CODEPILLS-META-END
@@ -37,8 +38,8 @@ Usage:
 Shift heading levels when embedding extracted content under another heading:
     const nested = htmlToMarkdown(article, 2); // h1 -> h3, h4 -> h6
 
-Copy a selected page region to the clipboard:
-    await navigator.clipboard.writeText(htmlToMarkdown($0));
+Show a selected page region in the clipboard popup:
+    htmlToMarkdown($0, 0, true);
 
 Run the built-in smoke test in Node from the repository root:
     node -e "const m = require('./javascript/mdtools.js'); m.selfTestHtmlToMarkdown();"
@@ -65,6 +66,8 @@ const MDTOOLS_FRAGMENT_NODE = 11;
  * @param {number} [shiftTitles=0] Heading level shift. Positive values make
  *     headings lower priority (h1 -> h2), negative values make headings higher
  *     priority (h2 -> h1). Results are clamped between h1 and h6.
+ * @param {boolean} [copyToClipboard=false] Show the generated Markdown in the
+ *     clipboard popup. Requires clipboard.js to be loaded first.
  * @returns {string} Trimmed Markdown representation of the node tree.
  *
  * @example
@@ -73,17 +76,30 @@ const MDTOOLS_FRAGMENT_NODE = 11;
  * @example
  * // Embed extracted content under an existing h2 by shifting headings down.
  * const markdown = htmlToMarkdown(document.querySelector('main'), 2);
+ *
+ * @example
+ * // Show generated Markdown in the clipboard popup while still returning it.
+ * const markdown = htmlToMarkdown(document.querySelector('article'), 0, true);
  */
-function htmlToMarkdown(element, shiftTitles=0){
+function htmlToMarkdown(element, shiftTitles=0, copyToClipboard=false){
     if (element === null || element === undefined){
         return '';
     }
 
-    return cleanMarkdown(nodeToMarkdown(element, {
+    const markdown = cleanMarkdown(nodeToMarkdown(element, {
         root: true,
         listDepth: 0,
         shiftTitles: normalizeHeadingShift(shiftTitles)
     }));
+
+    if (copyToClipboard){
+        if (typeof globalThis.copy2clipboardPopup !== 'function'){
+            throw new Error('copyToClipboard requires clipboard.js to be loaded first.');
+        }
+        globalThis.copy2clipboardPopup(markdown);
+    }
+
+    return markdown;
 }
 
 /**
@@ -649,6 +665,7 @@ function findFirst(node, predicate){
 function selfTestHtmlToMarkdown(){
     const warnings = [];
     const originalWarn = console.warn;
+    const originalCopy2ClipboardPopup = globalThis.copy2clipboardPopup;
     console.warn = function(message){
         warnings.push(String(message));
     };
@@ -723,6 +740,13 @@ function selfTestHtmlToMarkdown(){
         assertEqual(warnings[0], '[mdtools] Unsupported tag: custom-text', 'unsupported text-only tag warning text');
         assertEqual(warnings[1], '[mdtools] Unsupported tag: custom-box', 'unsupported wrapper tag warning text');
 
+        let popupMarkdown = null;
+        globalThis.copy2clipboardPopup = function(markdown){
+            popupMarkdown = markdown;
+        };
+        assertEqual(htmlToMarkdown(fixture, 0, true), expected, 'copy popup return value');
+        assertEqual(popupMarkdown, expected, 'copy popup markdown value');
+
         const headings = elem('div', {}, [
             elem('h1', {}, ['One']),
             elem('h2', {}, ['Two']),
@@ -775,6 +799,11 @@ function selfTestHtmlToMarkdown(){
         ].join('\n'), 'negative heading shift');
     } finally {
         console.warn = originalWarn;
+        if (originalCopy2ClipboardPopup === undefined){
+            delete globalThis.copy2clipboardPopup;
+        } else {
+            globalThis.copy2clipboardPopup = originalCopy2ClipboardPopup;
+        }
     }
 }
 
