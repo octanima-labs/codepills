@@ -2,7 +2,7 @@
 CODEPILLS-META-BEGIN
 schema: codepills.tool/v1
 name: mdtools
-version: 0.2.0
+version: 0.3.0
 author: octanima-labs
 description: Convert browser DOM content to Markdown
 repo: https://github.com/octanima-labs/codepills/blob/main/javascript/mdtools.js
@@ -43,6 +43,8 @@ Copy a selected page region to the clipboard:
 Run the built-in smoke test in Node from the repository root:
     node -e "const m = require('./javascript/mdtools.js'); m.selfTestHtmlToMarkdown();"
 */
+
+globalThis.mdtools = globalThis.mdtools || (() => {
 
 const MDTOOLS_TEXT_NODE = 3;
 const MDTOOLS_ELEMENT_NODE = 1;
@@ -829,14 +831,17 @@ function text(value){
     };
 }
 
+return {
+    htmlToMarkdown: htmlToMarkdown,
+    selfTestHtmlToMarkdown: selfTestHtmlToMarkdown
+};
+})();
+
 if (typeof globalThis !== 'undefined'){
-    globalThis.htmlToMarkdown = htmlToMarkdown;
-    globalThis.selfTestHtmlToMarkdown = selfTestHtmlToMarkdown;
+    globalThis.htmlToMarkdown = globalThis.mdtools.htmlToMarkdown;
+    globalThis.selfTestHtmlToMarkdown = globalThis.mdtools.selfTestHtmlToMarkdown;
 }
 
 if (typeof module !== 'undefined' && module.exports){
-    module.exports = {
-        htmlToMarkdown: htmlToMarkdown,
-        selfTestHtmlToMarkdown: selfTestHtmlToMarkdown
-    };
+    module.exports = globalThis.mdtools;
 }

@@ -2,7 +2,7 @@
 CODEPILLS-META-BEGIN
 schema: codepills.tool/v1
 name: hackaday-markdown
-version: 1.0.0
+version: 1.1.0
 author: octanima-labs
 description: Extract a Hackaday article from the browser DOM and print Markdown.
 repo: https://github.com/octanima-labs/codepills/blob/main/javascript/hackaday.js
@@ -18,6 +18,8 @@ platforms:
   - browser
 CODEPILLS-META-END
 */
+
+globalThis.hackaday = globalThis.hackaday || (() => {
 
 function getImages(elem){
     if (elem.querySelectorAll('img') === null){
@@ -106,7 +108,23 @@ function parseArticle(){
     return article;
 }
 
-console.log(toMarkdown(parseArticle()));
+function main(){
+    console.log(toMarkdown(parseArticle()));
+}
+
+return {
+    getImages: getImages,
+    parseDate: parseDate,
+    replaceLink: replaceLink,
+    replaceCode: replaceCode,
+    replaceLinkAndCode: replaceLinkAndCode,
+    toMarkdown: toMarkdown,
+    parseArticle: parseArticle,
+    main: main
+};
+})();
+
+globalThis.hackaday.main();
 
 
 // When click on cat/tag

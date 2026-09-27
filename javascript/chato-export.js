@@ -2,7 +2,7 @@
 CODEPILLS-META-BEGIN
 schema: codepills.tool/v1
 name: chato-export
-version: 1.13.0
+version: 1.14.0
 author: octanima-labs
 description: Export ChatGPT conversations to markdown
 repo: https://github.com/octanima-labs/codepills/blob/main/javascript/chato-export.js
@@ -18,6 +18,8 @@ platforms:
   - browser
 CODEPILLS-META-END
 */
+
+globalThis.chatoExport = globalThis.chatoExport || (() => {
 
 async function getConversation(){
     const DEBUG = true;
@@ -523,18 +525,29 @@ async function scrollToPageTop(){
     await wait(500);
 }
 
-try {
-    let conversation = null;
-} catch(SyntaxError) { // Avoid redeclaring the variable
-    conversation = null;
+let conversation = null;
+
+function main(){
+    return scrollToPageTop()
+        .then(() => getConversation())
+        .then(result => {
+            conversation = result;
+            console.log(conversation);
+            exportPopup(conversation);
+            return conversation;
+        });
 }
 
-
-scrollToPageTop()
-    .then(() => getConversation())
-    .then(result => {
-        conversation = result;
-        console.log(conversation);
-        exportPopup(conversation);
+return {
+    getConversation: getConversation,
+    copyTextToClipboard: copyTextToClipboard,
+    exportPopup: exportPopup,
+    scrollToPageTop: scrollToPageTop,
+    main: main,
+    get conversation(){
         return conversation;
-    });
+    }
+};
+})();
+
+globalThis.chatoExport.main();

@@ -2,7 +2,7 @@
 CODEPILLS-META-BEGIN
 schema: codepills.tool/v1
 name: xda-markdown
-version: 1.0.0
+version: 1.1.0
 author: octanima-labs
 description: Extract an XDA article from the browser DOM and print Markdown.
 repo: https://github.com/octanima-labs/codepills/blob/main/javascript/xda.js
@@ -14,10 +14,13 @@ tags:
   - markdown
 requires:
   - browser DOM
+  - mdtools.js
 platforms:
   - browser
 CODEPILLS-META-END
 */
+
+globalThis.xda = globalThis.xda || (() => {
 
 function getImages(elem){
     if (elem.querySelectorAll('img') === null){
@@ -84,4 +87,16 @@ function parseArticle(){
   return article;
 }
 
-console.log(toMarkdown(parseArticle()));
+function main(){
+  console.log(toMarkdown(parseArticle()));
+}
+
+return {
+  getImages: getImages,
+  toMarkdown: toMarkdown,
+  parseArticle: parseArticle,
+  main: main
+};
+})();
+
+globalThis.xda.main();

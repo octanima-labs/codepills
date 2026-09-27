@@ -36,6 +36,8 @@ from pathlib import Path
 BEGIN_MARKER = "CODEPILLS-META-BEGIN"
 END_MARKER = "CODEPILLS-META-END"
 SCRIPT_EXTENSIONS = {".js", ".ps1", ".py", ".sh"}
+JAVASCRIPT_DIR = Path("javascript")
+JAVASCRIPT_SNIPPETS = JAVASCRIPT_DIR / "snippets.js"
 DESTINATION_DIRS = {
     ".js": "javascript",
     ".ps1": "powershell",
@@ -92,6 +94,10 @@ class MetadataError(ValueError):
 
 class RunError(ValueError):
     """Raised when a script cannot be resolved or safely executed."""
+
+
+class DependencyError(ValueError):
+    """Raised when JavaScript dependencies cannot be bundled safely."""
 
 
 class EnsurePathError(ValueError):
@@ -496,7 +502,10 @@ def check_file(path: Path, root: Path) -> list[str]:
     except (OSError, UnicodeDecodeError, MetadataError) as error:
         return [str(error)]
 
-    return validate_metadata(path, root, metadata)
+    errors = validate_metadata(path, root, metadata)
+    if not errors:
+        errors.extend(check_javascript_dependencies(path, root))
+    return errors
 
 
 def selected_script_metadata(path: Path, root: Path) -> tuple[dict[str, object], list[str]]:
@@ -506,6 +515,105 @@ def selected_script_metadata(path: Path, root: Path) -> tuple[dict[str, object],
     except (OSError, UnicodeDecodeError, MetadataError) as error:
         return {}, [str(error)]
     return metadata, validate_metadata(path, root, metadata)
+
+
+def is_javascript_dependency_requirement(requirement: object) -> bool:
+    """Return true when a metadata requirement names a JavaScript dependency."""
+    return isinstance(requirement, str) and requirement.endswith(".js")
+
+
+def validate_javascript_dependency_name(requirement: str) -> list[str]:
+    """Validate one JavaScript dependency requirement filename."""
+    dependency = Path(requirement)
+    if (
+        "\\" in requirement
+        or dependency.name != requirement
+        or any(part in {"", ".", ".."} for part in dependency.parts)
+    ):
+        return [f"JavaScript dependency must be a filename in javascript/: {requirement}"]
+    if dependency.suffix != ".js":
+        return [f"JavaScript dependency must use .js: {requirement}"]
+    if dependency.name.startswith("snippets.") and dependency.name != JAVASCRIPT_SNIPPETS.name:
+        return [f"unsupported JavaScript snippets dependency: {requirement}"]
+    return []
+
+
+def javascript_dependency_path(requirement: str, root: Path) -> tuple[Path | None, list[str]]:
+    """Resolve one JavaScript dependency requirement under javascript/."""
+    errors = validate_javascript_dependency_name(requirement)
+    if errors:
+        return None, errors
+
+    path = root / JAVASCRIPT_DIR / requirement
+    if not path.is_file():
+        return None, [f"JavaScript dependency not found: {requirement}"]
+    if path.name != JAVASCRIPT_SNIPPETS.name and is_ignored(path, root):
+        return None, [f"JavaScript dependency is not a standalone script: {requirement}"]
+    return path, []
+
+
+def javascript_dependency_requirements(path: Path, root: Path) -> tuple[list[str], list[str]]:
+    """Return JavaScript dependency requirements declared by one JS script."""
+    if path.relative_to(root) == JAVASCRIPT_SNIPPETS:
+        return [], []
+
+    metadata, errors = selected_script_metadata(path, root)
+    if errors:
+        return [], errors
+
+    requirements = metadata.get("requires", [])
+    if not isinstance(requirements, list):
+        return [], ["requires must be a non-empty YAML list"]
+    return [str(item) for item in requirements if is_javascript_dependency_requirement(item)], []
+
+
+def resolve_javascript_bundle_order(targets: list[Path], root: Path) -> tuple[list[Path], list[str]]:
+    """Resolve JavaScript targets and dependencies in dependency-first order."""
+    order: list[Path] = []
+    permanent: set[Path] = set()
+    temporary: set[Path] = set()
+    errors: list[str] = []
+
+    def visit(path: Path, stack: list[Path]) -> None:
+        if path in permanent:
+            return
+        if path in temporary:
+            cycle_start = stack.index(path) if path in stack else 0
+            cycle = [*stack[cycle_start:], path]
+            errors.append(
+                "circular JavaScript dependency: "
+                + " -> ".join(item.name for item in cycle)
+            )
+            return
+
+        temporary.add(path)
+        requirements, requirement_errors = javascript_dependency_requirements(path, root)
+        errors.extend(f"{path.relative_to(root)}: {error}" for error in requirement_errors)
+
+        for requirement in requirements:
+            dependency_path, dependency_errors = javascript_dependency_path(requirement, root)
+            errors.extend(f"{path.relative_to(root)}: {error}" for error in dependency_errors)
+            if dependency_path is not None:
+                visit(dependency_path, [*stack, path])
+
+        temporary.remove(path)
+        permanent.add(path)
+        order.append(path)
+
+    for target in targets:
+        visit(target, [])
+
+    if errors:
+        return [], errors
+    return order, []
+
+
+def check_javascript_dependencies(path: Path, root: Path) -> list[str]:
+    """Validate JavaScript dependency metadata for one script."""
+    if path.suffix.lower() != ".js":
+        return []
+    _order, errors = resolve_javascript_bundle_order([path], root)
+    return errors
 
 
 def resolve_run_script(script: str, root: Path) -> Path:
@@ -1017,6 +1125,109 @@ def find_snippet(snippet_id: str, root: Path) -> tuple[dict[str, object] | None,
     return matches[0], []
 
 
+def javascript_namespace(filename: str) -> str:
+    """Return the browser namespace derived from a JavaScript filename."""
+    stem = Path(filename).stem
+    parts = [part for part in re.split(r"[-_]+", stem) if part]
+    if not parts:
+        return stem
+    return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
+
+
+def snippet_module_exports(source: str) -> list[str]:
+    """Return top-level function names exported by the snippets bundle module."""
+    names = []
+    seen = set()
+    pattern = re.compile(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", re.MULTILINE)
+    for match in pattern.finditer(source):
+        name = match.group(1)
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def render_javascript_snippets_module(path: Path) -> str:
+    """Render snippets.js as a paste-tolerant browser module."""
+    source = path.read_text(encoding="utf-8")
+    exports = snippet_module_exports(source)
+    export_lines = [f"        {name}: {name}" for name in exports]
+    export_block = ",\n".join(export_lines)
+    if export_block:
+        export_block = "\n" + export_block + "\n    "
+    return (
+        "globalThis.snippets = globalThis.snippets || (() => {\n"
+        f"{source.rstrip()}\n\n"
+        f"    return {{{export_block}}};\n"
+        "})();\n"
+    )
+
+
+def render_javascript_bundle_entry(path: Path, root: Path) -> str:
+    """Render one JavaScript file or generated module with bundle boundaries."""
+    relative = path.relative_to(root).as_posix()
+    if path.relative_to(root) == JAVASCRIPT_SNIPPETS:
+        content = render_javascript_snippets_module(path)
+    else:
+        content = path.read_text(encoding="utf-8")
+    return (
+        f"/* codepills-bundle: begin {relative} */\n"
+        f"{content.rstrip()}\n"
+        f"/* codepills-bundle: end {relative} */"
+    )
+
+
+def build_javascript_clipboard_bundle(
+    script_path: Path,
+    root: Path,
+    emitted: set[Path],
+) -> tuple[str | None, str | None]:
+    """Build clipboard content for one JavaScript script with dependencies."""
+    order, errors = resolve_javascript_bundle_order([script_path], root)
+    if errors:
+        return None, "; ".join(errors)
+
+    parts = []
+    for path in order:
+        if path in emitted:
+            continue
+        emitted.add(path)
+        try:
+            parts.append(render_javascript_bundle_entry(path, root))
+        except (OSError, UnicodeDecodeError) as error:
+            return None, f"could not read {path.relative_to(root)}: {error}"
+    return "\n\n".join(parts), None
+
+
+def resolve_get_clipboard_reference(
+    reference: str,
+    root: Path,
+    emitted_javascript: set[Path],
+) -> tuple[str | None, str | None]:
+    """Resolve a get reference into clipboard payload content."""
+    normalized = reference.casefold()
+    if SNIPPET_LOOKUP_PATTERN.fullmatch(normalized):
+        record, errors = find_snippet(reference, root)
+        if errors:
+            return None, errors[0]
+        if record is None:
+            return None, f"snippet not found: {normalized}"
+        return str(record.get("content", "")), None
+
+    try:
+        script_path = resolve_run_script(reference, root)
+    except RunError as error:
+        return None, str(error)
+
+    if script_path.suffix.lower() == ".js":
+        return build_javascript_clipboard_bundle(script_path, root, emitted_javascript)
+
+    try:
+        return script_path.read_text(encoding="utf-8"), None
+    except (OSError, UnicodeDecodeError) as error:
+        return None, f"could not read {script_path.relative_to(root)}: {error}"
+
+
 def resolve_get_reference(reference: str, root: Path) -> tuple[str, str] | tuple[None, str]:
     """Resolve a get reference into display and clipboard payloads, or an error."""
     normalized = reference.casefold()
@@ -1367,13 +1578,28 @@ def command_get(args: argparse.Namespace, root: Path) -> int:
             print(f"error: {error}", file=sys.stderr)
         return 1
 
+    clipboard_resolved = []
+    if args.copy:
+        emitted_javascript: set[Path] = set()
+        for reference in args.references:
+            clipboard, error = resolve_get_clipboard_reference(reference, root, emitted_javascript)
+            if error is not None:
+                errors.append(error)
+            elif clipboard is not None and clipboard != "":
+                clipboard_resolved.append(clipboard)
+
+        if errors:
+            for error in errors:
+                print(f"error: {error}", file=sys.stderr)
+            return 1
+
     display_content = "\n\n\n".join(display for display, _clipboard in resolved)
     sys.stdout.write(display_content)
     if not display_content.endswith("\n"):
         sys.stdout.write("\n")
 
     if args.copy:
-        clipboard_content = "\n\n\n".join(clipboard for _display, clipboard in resolved)
+        clipboard_content = "\n\n\n".join(clipboard_resolved)
         warning = copy_to_clipboard(clipboard_content)
         if warning:
             print(f"warning: {warning}", file=sys.stderr)

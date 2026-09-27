@@ -2,7 +2,7 @@
 CODEPILLS-META-BEGIN
 schema: codepills.tool/v1
 name: github
-version: 0.1.0
+version: 0.2.0
 author: octanima-labs
 description: Github toolkit
 repo: https://github.com/octanima-labs/codepills/blob/main/javascript/github.js
@@ -20,8 +20,15 @@ platforms:
 CODEPILLS-META-END
 */
 
+globalThis.github = globalThis.github || (() => {
+
 // Get repo names from GitHub
 function getRepoNames() {
     // https://github.com/<OWNER>?tab=repositories
     return Array.from(temp0.querySelectorAll('a[itemprop="name codeRepository"]')).map(e => e.innerText);
 }
+
+return {
+    getRepoNames: getRepoNames
+};
+})();
