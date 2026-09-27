@@ -1,0 +1,11 @@
+{
+  "extensions": [".py"],
+  "alias": "py",
+  "interpreter": ["sys.executable"],
+  "lineComment": "#",
+  "snippets": "snippets.py",
+  "metadataComment": {
+    "type": "line",
+    "prefix": "#"
+  }
+}

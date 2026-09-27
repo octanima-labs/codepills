@@ -125,3 +125,77 @@ powershell.exe -ExecutionPolicy Bypass -File .\venv\Scripts\Activate.ps1
 # - macOS
 
 Get-ChildItem Env:
+
+########################################
+
+function Get-DefaultDNSServer {
+    # Execute nslookup against a generic IP to force the header output
+    $output = nslookup 1.1.1.1
+
+    # Extract the name and IP based on line position and clean up whitespace
+    $name = ($output[0] -split ': ')[-1].Trim()
+    $ip   = ($output[1] -split ': ')[-1].Trim()
+
+    # Return a custom object with both properties
+    [PSCustomObject]@{
+        IP   = $ip
+        Name = $name
+    }
+}
+
+# Get AD user
+$searcher = [adsisearcher]"(samAccountName={username})";
+$user = $searcher.FindOne();
+if ($user) {{
+    $fullName = $user.Properties.displayname;
+    $initials = $user.Properties.initials;
+    $mail = $user.Properties.mail;
+    Write-Output "$fullName|$initials|$email"
+}} else {{
+    Write-Output "NOT_FOUND"
+}}
+
+# Hash files in current dir
+Get-ChildItem -File | Get-FileHash | Select-Object Hash, @{Name="FileName"; Expression={(Split-Path $_.Path -Leaf)}} | Format-Table -AutoSize
+
+# Get SSL certificate
+$targets = @(
+    "your-domain.com",
+)
+
+foreach ($target in $targets) {
+    $tcp = $null
+    $ssl = $null
+
+    try {
+        $tcp = [System.Net.Sockets.TcpClient]::new($target, 443)
+        $ssl = [System.Net.Security.SslStream]::new(
+            $tcp.GetStream(),
+            $false
+        )
+
+        # Uses normal Windows certificate-chain and hostname validation.
+        $ssl.AuthenticateAsClient($target)
+
+        [pscustomobject]@{
+            Target  = $target
+            Trusted = $true
+            Subject = $ssl.RemoteCertificate.Subject
+            Issuer  = $ssl.RemoteCertificate.Issuer
+            Error   = $null
+        }
+    }
+    catch {
+        [pscustomobject]@{
+            Target  = $target
+            Trusted = $false
+            Subject = $null
+            Issuer  = $null
+            Error   = $_.Exception.Message
+        }
+    }
+    finally {
+        if ($ssl) { $ssl.Dispose() }
+        if ($tcp) { $tcp.Dispose() }
+    }
+}

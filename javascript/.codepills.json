@@ -1,0 +1,12 @@
+{
+  "extensions": [".js"],
+  "alias": "js",
+  "interpreter": ["node"],
+  "lineComment": "//",
+  "snippets": "snippets.js",
+  "metadataComment": {
+    "type": "block",
+    "open": "/*",
+    "close": "*/"
+  }
+}

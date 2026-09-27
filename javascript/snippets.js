@@ -86,3 +86,81 @@ function sidepanel_width(width) {
     console.log(`[+] Side-panel updated: width ${_final_width}px`)
     // TODO: check if I can de it by drag-drop the container edge.
 }
+
+
+//////////////////////////////////////////////////////////////
+
+/*+======================================================+*/
+/*| Timestamp now                                         |*/
+/*+======================================================+*/
+Date.now()
+
+/*+======================================================+*/
+/*| Datetime now                                         |*/
+/*+======================================================+*/
+new Date(Date.now()).toLocaleString()
+
+/*+======================================================+*/
+/*| Reject cookies automatically                         |*/
+/*+======================================================+*/
+function wastedCookies(rejectManually=false) {
+  const elements = Array.from(document.querySelectorAll('div[role="dialog"] input[type="checkbox"]'));
+  console.log(`[*] ${elements.length} cookie providers detected 😶‍🌫️`);
+  console.log(`[*] Eating unnecessary cookies 🍪...`);
+  for (let i = 0; i < elements.length; i++) {
+    const e = elements[i];
+    e.checked = false;
+  }
+  console.log(`[+] No cookies left 🫙`);
+  if (!rejectManually) {
+    document.querySelector('button.fc-button.fc-confirm-choices.fc-primary-button').click();
+    console.log(`[+] Choices confirmed automatically ✅`);
+  } else {
+    console.log(`[*] Now you just need to confirm your choices👇`);
+  }
+}
+
+
+/*+======================================================+*/
+/*| I promise going to sleep                             |*/
+/*+======================================================+*/
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Then to call it (from an async funtion)
+await sleep(DELAY);
+
+
+/*+======================================================+*/
+/*| Copy to clipboard                                    |*/
+/*+======================================================+*/
+const copyToClipboard = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    alert('JSON copied to clipboard!');
+  } catch (err) {
+    console.error('Failed to copy: ', err);
+    alert('Failed to copy manually. Check console.');
+  }
+};
+
+//Then to call it, for example, from a button
+copyBtn.onclick = () => copyToClipboard(JSON.stringify(results, null, 2));
+
+
+
+/*+======================================================+*/
+/*| Progress bar in the terminal                         |*/
+/*+======================================================+*/
+let percentage = 0;
+let prevPercentage = 0
+
+for (let i = 0; i < elements.length; i++) {
+  const e = elements[i];
+  // Do your nasty things here
+
+  // Update Progress
+  percentage = Math.floor((i/elements.length) * 100)
+  if (percentage > prevPercentage){
+    console.log(`${percentage}% (${i}/${elements.length})`);
+    prevPercentage = percentage;
+  }

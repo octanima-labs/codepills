@@ -1,0 +1,11 @@
+{
+  "extensions": [".sh"],
+  "alias": "sh",
+  "interpreter": ["bash"],
+  "lineComment": "#",
+  "snippets": "snippets.sh",
+  "metadataComment": {
+    "type": "line",
+    "prefix": "#"
+  }
+}

@@ -8,8 +8,9 @@ running standalone tools.
 ## Layout
 
 - `codepills.py`: repository helper CLI.
-- `python/`, `bash/`, `powershell/`, `javascript/`: language-specific scripts.
-- `*/snippets.*`: normalized snippet notebooks for each language.
+- Category directories such as `python/`, `bash/`, `powershell/`, `javascript/`, and `typescript/` contain standalone scripts and snippets.
+- `*/.codepills.json`: category configuration. Only top-level directories with this file are managed by Code Pills commands.
+- `*/snippets.*`: normalized snippet notebooks configured per category.
 
 ## Quick Start
 
@@ -149,9 +150,10 @@ codepills reset
 codepills reset --force
 ```
 
-`reset` empties language folders, recreates empty snippet notebooks, removes the
-current `.git` directory, and runs `git init`. It keeps `codepills.py`,
-`README.md`, and the language folders. It does not configure a remote.
+`reset` empties configured category folders, recreates empty snippet notebooks,
+removes the current `.git` directory, and runs `git init`. It keeps
+`codepills.py`, `README.md`, category folders, and each category's
+`.codepills.json`. It does not configure a remote.
 
 After reset, configure your own remote:
 
@@ -198,10 +200,21 @@ python codepills.py get py0001 python/pingwave
 python codepills.py get -c py0001 javascript/xda
 ```
 
-Snippet references use stable IDs such as `py0001`, `sh0001`, `ps0001`, and
-`js0001`. Script references use `<language>/<name>` with an optional extension,
-such as `python/pingwave`, `python/pingwave.py`, `javascript/xda`, or
-`javascript/xda.js`. Bare filenames such as `xda.js` are not script references.
+Snippet references use stable IDs whose two-letter prefix is the category alias,
+such as `py0001`, `sh0001`, `ps0001`, `js0001`, and `ts0001` when TypeScript
+snippets exist.
+
+Script references can use a configured category, a category alias, or a bare
+filename with a configured extension:
+
+- `python/pingwave` or `python/pingwave.py`
+- `py/pingwave` or `py/pingwave.py`
+- `pingwave.py`
+- `javascript/xda`, `js/xda`, or `xda.js`
+
+Bare extensionless filenames such as `pingwave` are invalid because they do not
+identify a category. Nested script references such as `bash/aws/testrds.sh` are
+not supported.
 
 For snippets, `get` prints only the snippet content; the ID/header metadata is
 omitted. For scripts, `get` prints the absolute path to the resolved script
@@ -229,15 +242,19 @@ python codepills.py run python/zipperzero --self-test
 python codepills.py run powershell/barabara -h
 ```
 
-The script reference is `<language>/<name>` with an optional extension. Examples:
+The script reference is a configured category/name, alias/name, or filename with
+a configured extension. Examples:
 
 - `python/pingwave` or `python/pingwave.py`
+- `py/pingwave` or `pingwave.py`
 - `bash/swap_file` or `bash/swap_file.sh`
 - `powershell/barabara` or `powershell/barabara.ps1`
 - `javascript/xda` or `javascript/xda.js`
 
 `run` executes standalone scripts only. Snippets are not runnable through this
-command, and browser JavaScript snippets/scripts are blocked from CLI execution.
+command. A script must include the metadata tag `cli` to be runnable through
+`codepills run`; browser JavaScript snippets/scripts should omit `cli` and are
+blocked from CLI execution.
 
 ### Import
 
@@ -248,15 +265,18 @@ python codepills.py import /path/to/tool.py
 python codepills.py import /path/to/tool.py --name better-name
 ```
 
-The destination directory is chosen from the file extension:
+The destination category is chosen from the file extension configured in a
+category's `.codepills.json`:
 
 - `.py` -> `python/`
 - `.sh` -> `bash/`
 - `.ps1` -> `powershell/`
 - `.js` -> `javascript/`
+- `.ts` -> `typescript/`
 
-`--name` is a filename stem only; the original extension is preserved. Existing
-destination files are not overwritten.
+`--name` is a filename stem only; the original extension is preserved. Files
+without an extension, or with an extension that no category declares, are
+rejected. Existing destination files are not overwritten.
 
 The generated `repo` metadata is inferred from `git remote origin`. If `origin`
 is not configured, `import` fails with a clear error.
@@ -284,10 +304,46 @@ Run `python codepills.py check` after editing scripts. `check` requires `repo`
 to be present, but it does not require the URL to match the current local
 `origin`; imported scripts may preserve their original upstream URLs.
 
+## Category Configuration
+
+Top-level directories are managed by Code Pills only when they contain a
+`.codepills.json` file. Directories without this file are treated as repository
+support content and ignored by Code Pills commands.
+
+Example JavaScript category config:
+
+```json
+{
+  "extensions": [".js"],
+  "alias": "js",
+  "interpreter": ["node"],
+  "lineComment": "//",
+  "snippets": "snippets.js",
+  "metadataComment": {
+    "type": "block",
+    "open": "/*",
+    "close": "*/"
+  }
+}
+```
+
+Category config fields:
+
+- `extensions`: one or more lowercase file extensions owned by the category.
+- `alias`: lowercase two-character alias, also used as the snippet ID prefix.
+- `interpreter`: command used by `codepills run` for non-shebang scripts. The
+  token `sys.executable` resolves to the current Python executable.
+- `lineComment`: line comment prefix used by the category's snippet notebook.
+- `snippets`: snippet notebook filename, including extension.
+- `metadataComment`: metadata header comment style. Use `type: "line"` with
+  `prefix`, or `type: "block"` with `open` and `close`.
+
+Aliases and extensions must be unique across all configured categories.
+
 ## Snippet Format
 
-Snippets live in language-specific `snippets.*` files. Each snippet has a stable
-ID, metadata header, and content body.
+Snippets live in the `snippets` file configured by each category. Each snippet
+has a stable ID, metadata header, and content body.
 
 ```python
 # ### ID: py0001 ###
@@ -305,12 +361,13 @@ def input_multiline():
     ...
 ```
 
-ID prefixes are language-specific:
+ID prefixes are category aliases:
 
 - Python: `py0001`
 - Bash: `sh0001`
 - PowerShell: `ps0001`
 - JavaScript: `js0001`
+- TypeScript: `ts0001`
 
 IDs are stable once assigned. When adding a snippet, use the lowest available
 number for that language.
@@ -326,6 +383,12 @@ python codepills.py check
 Useful focused checks:
 
 ```bash
+python -m py_compile codepills.py
+python codepills.py get python/pingwave
+python codepills.py get py/pingwave
+python codepills.py get pingwave.py
+python codepills.py get py0001
+python codepills.py run python/pingwave --help
 python python/freezenv.py --tests
 python python/zipperzero.py --self-test
 python python/pingwave.py --tests

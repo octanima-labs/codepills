@@ -1,0 +1,12 @@
+{
+  "extensions": [".ts"],
+  "alias": "ts",
+  "interpreter": ["node"],
+  "lineComment": "//",
+  "snippets": "snippets.ts",
+  "metadataComment": {
+    "type": "block",
+    "open": "/*",
+    "close": "*/"
+  }
+}

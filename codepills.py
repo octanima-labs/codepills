@@ -25,50 +25,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
 BEGIN_MARKER = "CODEPILLS-META-BEGIN"
 END_MARKER = "CODEPILLS-META-END"
-SCRIPT_EXTENSIONS = {".js", ".ps1", ".py", ".sh"}
-JAVASCRIPT_DIR = Path("javascript")
-JAVASCRIPT_SNIPPETS = JAVASCRIPT_DIR / "snippets.js"
-DESTINATION_DIRS = {
-    ".js": "javascript",
-    ".ps1": "powershell",
-    ".py": "python",
-    ".sh": "bash",
-}
-LANGUAGE_EXTENSIONS = {
-    "bash": ".sh",
-    "javascript": ".js",
-    "powershell": ".ps1",
-    "python": ".py",
-}
-DEFAULT_INTERPRETERS = {
-    ".js": ["node"],
-    ".ps1": ["pwsh", "-NoProfile", "-File"],
-    ".py": [sys.executable],
-    ".sh": ["bash"],
-}
-SNIPPET_FILES = {
-    Path("bash/snippets.sh"): {"language": "bash", "prefix": "sh", "comment": "#"},
-    Path("javascript/snippets.js"): {"language": "javascript", "prefix": "js", "comment": "//"},
-    Path("powershell/snippets.ps1"): {
-        "language": "powershell",
-        "prefix": "ps",
-        "comment": "#",
-    },
-    Path("python/snippets.py"): {"language": "python", "prefix": "py", "comment": "#"},
-}
-SNIPPET_PREFIX_TO_PATH = {
-    str(config["prefix"]): path for path, config in SNIPPET_FILES.items()
-}
+CATEGORY_CONFIG_FILENAME = ".codepills.json"
+JAVASCRIPT_CATEGORY = "javascript"
 REQUIRED_KEYS = (
     "schema",
     "name",
@@ -86,6 +56,44 @@ LIST_KEYS = {"tags", "requires", "platforms"}
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 SNIPPET_ID_PATTERN = re.compile(r"^### ID: ([a-z]{2}\d{4}) ###$")
 SNIPPET_LOOKUP_PATTERN = re.compile(r"^[a-z]{2}\d{4}$")
+CATEGORY_ALIAS_PATTERN = re.compile(r"^[a-z]{2}$")
+
+
+@dataclass(frozen=True)
+class MetadataComment:
+    """Configured comment style for standalone script metadata."""
+
+    type: str
+    prefix: str | None = None
+    open: str | None = None
+    close: str | None = None
+
+
+@dataclass(frozen=True)
+class CategoryConfig:
+    """Validated Code Pills category configuration."""
+
+    name: str
+    path: Path
+    extensions: tuple[str, ...]
+    alias: str
+    interpreter: tuple[str, ...]
+    line_comment: str
+    snippets: str
+    metadata_comment: MetadataComment
+
+    @property
+    def snippets_path(self) -> Path:
+        return self.path / self.snippets
+
+
+@dataclass(frozen=True)
+class CategoryRegistry:
+    """Runtime category registry and reverse indexes."""
+
+    categories: dict[str, CategoryConfig]
+    aliases: dict[str, CategoryConfig]
+    extensions: dict[str, CategoryConfig]
 
 
 class MetadataError(ValueError):
@@ -106,6 +114,135 @@ class EnsurePathError(ValueError):
 
 class RepoConfigError(ValueError):
     """Raised when repository URL metadata cannot be inferred."""
+
+
+class CategoryConfigError(ValueError):
+    """Raised when Code Pills category configuration is invalid."""
+
+
+def require_string(data: dict[str, object], key: str, category: str) -> str:
+    """Return a required non-empty string field from category config."""
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise CategoryConfigError(f"{category}: {key} must be a non-empty string")
+    return value
+
+
+def require_string_list(data: dict[str, object], key: str, category: str) -> tuple[str, ...]:
+    """Return a required non-empty list of non-empty strings."""
+    value = data.get(key)
+    if not isinstance(value, list) or not value:
+        raise CategoryConfigError(f"{category}: {key} must be a non-empty list")
+    if not all(isinstance(item, str) and item for item in value):
+        raise CategoryConfigError(f"{category}: {key} must contain only non-empty strings")
+    return tuple(value)
+
+
+def load_metadata_comment(data: dict[str, object], category: str) -> MetadataComment:
+    """Load and validate metadata comment config."""
+    value = data.get("metadataComment")
+    if not isinstance(value, dict):
+        raise CategoryConfigError(f"{category}: metadataComment must be an object")
+
+    comment_type = value.get("type")
+    if comment_type == "line":
+        prefix = value.get("prefix")
+        if not isinstance(prefix, str) or not prefix:
+            raise CategoryConfigError(f"{category}: line metadataComment requires prefix")
+        return MetadataComment(type="line", prefix=prefix)
+
+    if comment_type == "block":
+        opener = value.get("open")
+        closer = value.get("close")
+        if not isinstance(opener, str) or not opener:
+            raise CategoryConfigError(f"{category}: block metadataComment requires open")
+        if not isinstance(closer, str) or not closer:
+            raise CategoryConfigError(f"{category}: block metadataComment requires close")
+        return MetadataComment(type="block", open=opener, close=closer)
+
+    raise CategoryConfigError(f"{category}: metadataComment.type must be line or block")
+
+
+def load_category_config(path: Path, root: Path) -> CategoryConfig:
+    """Load one category configuration file."""
+    category = path.name
+    config_path = path / CATEGORY_CONFIG_FILENAME
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise CategoryConfigError(f"{category}: invalid JSON in {CATEGORY_CONFIG_FILENAME}: {error}") from error
+    except OSError as error:
+        raise CategoryConfigError(f"{category}: cannot read {CATEGORY_CONFIG_FILENAME}: {error}") from error
+
+    if not isinstance(data, dict):
+        raise CategoryConfigError(f"{category}: {CATEGORY_CONFIG_FILENAME} must contain an object")
+
+    extensions = require_string_list(data, "extensions", category)
+    alias = require_string(data, "alias", category)
+    interpreter = require_string_list(data, "interpreter", category)
+    line_comment = require_string(data, "lineComment", category)
+    snippets = require_string(data, "snippets", category)
+    metadata_comment = load_metadata_comment(data, category)
+
+    if not CATEGORY_ALIAS_PATTERN.fullmatch(alias):
+        raise CategoryConfigError(f"{category}: alias must be a lowercase two-character string")
+    for extension in extensions:
+        if not extension.startswith(".") or extension != extension.lower() or len(extension) < 2:
+            raise CategoryConfigError(f"{category}: invalid extension: {extension}")
+    snippet_path = Path(snippets)
+    if snippet_path.name != snippets or any(part in {"", ".", ".."} for part in snippet_path.parts):
+        raise CategoryConfigError(f"{category}: snippets must be a filename")
+
+    return CategoryConfig(
+        name=category,
+        path=path.relative_to(root),
+        extensions=extensions,
+        alias=alias,
+        interpreter=interpreter,
+        line_comment=line_comment,
+        snippets=snippets,
+        metadata_comment=metadata_comment,
+    )
+
+
+def load_category_registry(root: Path) -> CategoryRegistry:
+    """Load and validate all managed category configurations."""
+    categories: dict[str, CategoryConfig] = {}
+    aliases: dict[str, CategoryConfig] = {}
+    extensions: dict[str, CategoryConfig] = {}
+    errors = []
+
+    for path in sorted(root.iterdir()):
+        if not path.is_dir() or path.name.startswith("."):
+            continue
+        if not (path / CATEGORY_CONFIG_FILENAME).is_file():
+            continue
+        try:
+            config = load_category_config(path, root)
+        except CategoryConfigError as error:
+            errors.append(str(error))
+            continue
+
+        categories[config.name] = config
+        if config.alias in aliases:
+            errors.append(
+                f"{config.name}: alias {config.alias!r} already used by {aliases[config.alias].name}"
+            )
+        else:
+            aliases[config.alias] = config
+
+        for extension in config.extensions:
+            if extension in extensions:
+                errors.append(
+                    f"{config.name}: extension {extension!r} already used by {extensions[extension].name}"
+                )
+            else:
+                extensions[extension] = config
+
+    if errors:
+        raise CategoryConfigError("invalid Code Pills category configuration:\n" + "\n".join(f"  - {error}" for error in errors))
+
+    return CategoryRegistry(categories=categories, aliases=aliases, extensions=extensions)
 
 
 def run_git(root: Path, *args: str) -> str | None:
@@ -169,7 +306,7 @@ def git_author(root: Path) -> str:
     )
 
 
-def is_ignored(path: Path, root: Path) -> bool:
+def is_ignored(path: Path, root: Path, registry: CategoryRegistry | None = None) -> bool:
     """Return true for files that are not standalone script targets."""
     relative = path.relative_to(root)
     if ".git" in relative.parts:
@@ -181,43 +318,48 @@ def is_ignored(path: Path, root: Path) -> bool:
     return relative.as_posix() == "javascript/lib.js"
 
 
-def iter_script_paths(root: Path) -> list[Path]:
-    """Collect standalone script candidates by extension."""
+def iter_script_paths(root: Path, registry: CategoryRegistry | None = None) -> list[Path]:
+    """Collect direct-child standalone script candidates from configured categories."""
+    registry = registry or load_category_registry(root)
     paths = []
-    for path in root.rglob("*"):
-        if not path.is_file():
+    for category in registry.categories.values():
+        directory = root / category.path
+        if not directory.is_dir():
             continue
-        if path.suffix.lower() not in SCRIPT_EXTENSIONS:
-            continue
-        if is_ignored(path, root):
-            continue
-        paths.append(path)
+        for path in directory.iterdir():
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in category.extensions:
+                continue
+            if is_ignored(path, root, registry):
+                continue
+            paths.append(path)
     return sorted(paths)
 
 
-def strip_line_comment(line: str) -> str:
-    """Remove one leading hash comment marker from a metadata line."""
-    if not line.startswith("#"):
-        raise MetadataError("metadata line is not a hash comment")
-    text = line[1:]
+def strip_line_comment(line: str, prefix: str = "#") -> str:
+    """Remove one leading configured line comment marker from a metadata line."""
+    if not line.startswith(prefix):
+        raise MetadataError("metadata line does not use the configured line comment")
+    text = line[len(prefix) :]
     if text.startswith(" "):
         text = text[1:]
     return text
 
 
-def extract_hash_comment_metadata(lines: list[str]) -> list[str]:
-    """Extract metadata from Python and Bash hash-comment headers."""
+def extract_line_comment_metadata(lines: list[str], prefix: str) -> list[str]:
+    """Extract metadata from line-comment headers."""
     start_index = 1 if lines and lines[0].startswith("#!") else 0
     if start_index >= len(lines):
         raise MetadataError("missing metadata header")
 
-    first_line = strip_line_comment(lines[start_index])
+    first_line = strip_line_comment(lines[start_index], prefix)
     if first_line.strip() != BEGIN_MARKER:
         raise MetadataError("metadata header must start at the top of the file")
 
     metadata = []
     for line in lines[start_index + 1 :]:
-        text = strip_line_comment(line)
+        text = strip_line_comment(line, prefix)
         if text.strip() == END_MARKER:
             return metadata
         metadata.append(text)
@@ -248,19 +390,37 @@ def extract_block_comment_metadata(
     raise MetadataError("missing CODEPILLS-META-END marker")
 
 
-def extract_metadata_lines(path: Path) -> list[str]:
+def category_for_path(path: Path, root: Path, registry: CategoryRegistry) -> CategoryConfig:
+    """Return the configured category for a repo path."""
+    relative = path.relative_to(root)
+    if len(relative.parts) < 2:
+        raise MetadataError("script must be inside a configured category")
+    category_name = relative.parts[0]
+    category = registry.categories.get(category_name)
+    if category is None:
+        raise MetadataError(f"unknown category: {category_name}")
+    if path.suffix.lower() not in category.extensions:
+        raise MetadataError(f"unsupported extension for {category_name}: {path.suffix}")
+    return category
+
+
+def extract_metadata_lines(path: Path, root: Path | None = None, registry: CategoryRegistry | None = None, category: CategoryConfig | None = None) -> list[str]:
     """Extract uncommented metadata YAML lines from one script."""
     lines = path.read_text(encoding="utf-8").splitlines()
-    suffix = path.suffix.lower()
+    if category is None:
+        if root is None or registry is None:
+            raise MetadataError("category context is required for metadata extraction")
+        category = category_for_path(path, root, registry)
 
-    if suffix in {".py", ".sh"}:
-        return extract_hash_comment_metadata(lines)
-    if suffix == ".js":
-        return extract_block_comment_metadata(lines, "/*", "*/")
-    if suffix == ".ps1":
-        return extract_block_comment_metadata(lines, "<#", "#>")
+    comment = category.metadata_comment
+    if comment.type == "line":
+        assert comment.prefix is not None
+        return extract_line_comment_metadata(lines, comment.prefix)
+    if comment.type == "block":
+        assert comment.open is not None and comment.close is not None
+        return extract_block_comment_metadata(lines, comment.open, comment.close)
 
-    raise MetadataError(f"unsupported script extension: {suffix}")
+    raise MetadataError(f"unsupported metadata comment style: {comment.type}")
 
 
 def has_metadata_header(path: Path) -> bool:
@@ -364,95 +524,62 @@ def metadata_to_lines(metadata: dict[str, object]) -> list[str]:
     return lines
 
 
-def comment_metadata_lines(lines: list[str], suffix: str) -> list[str]:
-    """Wrap raw metadata lines in the comment style for a script type."""
-    if suffix in {".py", ".sh"}:
-        commented = [f"# {BEGIN_MARKER}"]
-        commented.extend(f"# {line}" if line else "#" for line in lines)
-        commented.append(f"# {END_MARKER}")
+def comment_metadata_lines(lines: list[str], category: CategoryConfig) -> list[str]:
+    """Wrap raw metadata lines in the configured category comment style."""
+    comment = category.metadata_comment
+    if comment.type == "line":
+        assert comment.prefix is not None
+        commented = [f"{comment.prefix} {BEGIN_MARKER}"]
+        commented.extend(f"{comment.prefix} {line}" if line else comment.prefix for line in lines)
+        commented.append(f"{comment.prefix} {END_MARKER}")
         return commented
 
-    if suffix == ".js":
-        return ["/*", BEGIN_MARKER, *lines, END_MARKER, "*/"]
+    if comment.type == "block":
+        assert comment.open is not None and comment.close is not None
+        return [comment.open, BEGIN_MARKER, *lines, END_MARKER, comment.close]
 
-    if suffix == ".ps1":
-        return ["<#", BEGIN_MARKER, *lines, END_MARKER, "#>"]
-
-    raise MetadataError(f"unsupported script extension: {suffix}")
+    raise MetadataError(f"unsupported metadata comment style: {comment.type}")
 
 
-def default_metadata(source: Path, destination: Path, root: Path) -> dict[str, object]:
+def default_metadata(source: Path, destination: Path, root: Path, category: CategoryConfig) -> dict[str, object]:
     """Generate conservative metadata for an imported script."""
-    suffix = destination.suffix.lower()
     stem_name = destination.stem.replace("_", "-").lower()
-
-    language_defaults = {
-        ".py": {
-            "description": f"Run the {stem_name} Python script.",
-            "usage": f"python {destination.relative_to(root).as_posix()}",
-            "tags": ["python", "script"],
-            "requires": ["Python standard library"],
-            "platforms": ["Linux", "macOS", "Windows"],
-        },
-        ".sh": {
-            "description": f"Run the {stem_name} Bash script.",
-            "usage": f"bash {destination.relative_to(root).as_posix()}",
-            "tags": ["bash", "script"],
-            "requires": ["bash"],
-            "platforms": ["Linux", "macOS"],
-        },
-        ".ps1": {
-            "description": f"Run the {stem_name} PowerShell script.",
-            "usage": f"pwsh -NoProfile -File {destination.relative_to(root).as_posix()}",
-            "tags": ["powershell", "script"],
-            "requires": ["PowerShell"],
-            "platforms": ["Windows", "Linux", "macOS"],
-        },
-        ".js": {
-            "description": f"Run the {stem_name} JavaScript script.",
-            "usage": f"node {destination.relative_to(root).as_posix()}",
-            "tags": ["javascript", "script"],
-            "requires": ["JavaScript runtime"],
-            "platforms": ["Linux", "macOS", "Windows"],
-        },
-    }
-
-    defaults = language_defaults[suffix]
+    interpreter = [sys.executable if item == "sys.executable" else item for item in category.interpreter]
+    usage_prefix = " ".join(interpreter) if interpreter else "run"
     return {
         "schema": "codepills.tool/v1",
         "name": stem_name,
         "version": "0.1.0",
         "author": git_author(root),
-        "description": defaults["description"],
+        "description": f"Run the {stem_name} {category.name} script.",
         "repo": repo_url_for(destination, root),
         "license": "MIT",
-        "usage": defaults["usage"],
-        "tags": defaults["tags"],
-        "requires": defaults["requires"],
-        "platforms": defaults["platforms"],
+        "usage": f"{usage_prefix} {destination.relative_to(root).as_posix()}",
+        "tags": [category.name, "script"],
+        "requires": [interpreter[0] if interpreter else category.name],
+        "platforms": ["Linux", "macOS", "Windows"],
     }
 
 
-def insert_metadata_header(source: Path, destination: Path, metadata: dict[str, object]) -> None:
+def insert_metadata_header(source: Path, destination: Path, metadata: dict[str, object], category: CategoryConfig) -> None:
     """Copy source to destination with a generated metadata header."""
-    suffix = destination.suffix.lower()
     lines = source.read_text(encoding="utf-8").splitlines()
     body = lines
     prefix = []
 
-    if suffix in {".py", ".sh"} and lines and lines[0].startswith("#!"):
+    if category.metadata_comment.type == "line" and lines and lines[0].startswith("#!"):
         prefix = [lines[0]]
         body = lines[1:]
 
-    header = comment_metadata_lines(metadata_to_lines(metadata), suffix)
+    header = comment_metadata_lines(metadata_to_lines(metadata), category)
     output_lines = [*prefix, *header, "", *body]
     destination.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
 
 
-def copy_with_existing_metadata(source: Path, destination: Path, root: Path) -> list[str]:
+def copy_with_existing_metadata(source: Path, destination: Path, root: Path, category: CategoryConfig) -> list[str]:
     """Copy a valid metadata-bearing script, updating only its repo URL."""
     try:
-        metadata = parse_metadata(extract_metadata_lines(source))
+        metadata = parse_metadata(extract_metadata_lines(source, category=category))
     except (OSError, UnicodeDecodeError, MetadataError) as error:
         return [str(error)]
 
@@ -462,21 +589,22 @@ def copy_with_existing_metadata(source: Path, destination: Path, root: Path) -> 
 
     shutil.copyfile(source, destination)
     metadata["repo"] = repo_url_for(destination, root)
-    update_metadata_header(destination, metadata)
+    update_metadata_header(destination, root, load_category_registry(root), metadata)
     return []
 
 
-def update_metadata_header(path: Path, metadata: dict[str, object]) -> None:
+def update_metadata_header(path: Path, root: Path, registry: CategoryRegistry, metadata: dict[str, object]) -> None:
     """Replace the leading metadata header in an existing script."""
-    suffix = path.suffix.lower()
+    category = category_for_path(path, root, registry)
     lines = path.read_text(encoding="utf-8").splitlines()
-    start = 1 if suffix in {".py", ".sh"} and lines and lines[0].startswith("#!") else 0
-    header = comment_metadata_lines(metadata_to_lines(metadata), suffix)
+    start = 1 if category.metadata_comment.type == "line" and lines and lines[0].startswith("#!") else 0
+    header = comment_metadata_lines(metadata_to_lines(metadata), category)
 
-    if suffix in {".py", ".sh"}:
+    if category.metadata_comment.type == "line":
+        assert category.metadata_comment.prefix is not None
         end = None
         for index in range(start, len(lines)):
-            if strip_line_comment(lines[index]).strip() == END_MARKER:
+            if strip_line_comment(lines[index], category.metadata_comment.prefix).strip() == END_MARKER:
                 end = index + 1
                 break
         if end is None:
@@ -494,27 +622,35 @@ def update_metadata_header(path: Path, metadata: dict[str, object]) -> None:
     path.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
 
 
-def check_file(path: Path, root: Path) -> list[str]:
+def check_file(path: Path, root: Path, registry: CategoryRegistry) -> list[str]:
     """Validate one script and return human-readable errors."""
     try:
-        metadata_lines = extract_metadata_lines(path)
+        metadata_lines = extract_metadata_lines(path, root, registry)
         metadata = parse_metadata(metadata_lines)
     except (OSError, UnicodeDecodeError, MetadataError) as error:
         return [str(error)]
 
     errors = validate_metadata(path, root, metadata)
     if not errors:
-        errors.extend(check_javascript_dependencies(path, root))
+        errors.extend(check_javascript_dependencies(path, root, registry))
     return errors
 
 
-def selected_script_metadata(path: Path, root: Path) -> tuple[dict[str, object], list[str]]:
+def selected_script_metadata(path: Path, root: Path, registry: CategoryRegistry) -> tuple[dict[str, object], list[str]]:
     """Parse and validate metadata for one selected standalone script."""
     try:
-        metadata = parse_metadata(extract_metadata_lines(path))
+        metadata = parse_metadata(extract_metadata_lines(path, root, registry))
     except (OSError, UnicodeDecodeError, MetadataError) as error:
         return {}, [str(error)]
     return metadata, validate_metadata(path, root, metadata)
+
+
+def javascript_category(registry: CategoryRegistry) -> CategoryConfig | None:
+    """Return the configured JavaScript category, if present."""
+    category = registry.categories.get(JAVASCRIPT_CATEGORY)
+    if category is None or ".js" not in category.extensions:
+        return None
+    return category
 
 
 def is_javascript_dependency_requirement(requirement: object) -> bool:
@@ -522,7 +658,7 @@ def is_javascript_dependency_requirement(requirement: object) -> bool:
     return isinstance(requirement, str) and requirement.endswith(".js")
 
 
-def validate_javascript_dependency_name(requirement: str) -> list[str]:
+def validate_javascript_dependency_name(requirement: str, category: CategoryConfig) -> list[str]:
     """Validate one JavaScript dependency requirement filename."""
     dependency = Path(requirement)
     if (
@@ -530,34 +666,38 @@ def validate_javascript_dependency_name(requirement: str) -> list[str]:
         or dependency.name != requirement
         or any(part in {"", ".", ".."} for part in dependency.parts)
     ):
-        return [f"JavaScript dependency must be a filename in javascript/: {requirement}"]
+        return [f"JavaScript dependency must be a filename in {category.name}/: {requirement}"]
     if dependency.suffix != ".js":
         return [f"JavaScript dependency must use .js: {requirement}"]
-    if dependency.name.startswith("snippets.") and dependency.name != JAVASCRIPT_SNIPPETS.name:
+    if dependency.name.startswith("snippets.") and dependency.name != category.snippets:
         return [f"unsupported JavaScript snippets dependency: {requirement}"]
     return []
 
 
-def javascript_dependency_path(requirement: str, root: Path) -> tuple[Path | None, list[str]]:
+def javascript_dependency_path(requirement: str, root: Path, registry: CategoryRegistry) -> tuple[Path | None, list[str]]:
     """Resolve one JavaScript dependency requirement under javascript/."""
-    errors = validate_javascript_dependency_name(requirement)
+    category = javascript_category(registry)
+    if category is None:
+        return None, ["JavaScript category is not configured"]
+    errors = validate_javascript_dependency_name(requirement, category)
     if errors:
         return None, errors
 
-    path = root / JAVASCRIPT_DIR / requirement
+    path = root / category.path / requirement
     if not path.is_file():
         return None, [f"JavaScript dependency not found: {requirement}"]
-    if path.name != JAVASCRIPT_SNIPPETS.name and is_ignored(path, root):
+    if path.name != category.snippets and is_ignored(path, root, registry):
         return None, [f"JavaScript dependency is not a standalone script: {requirement}"]
     return path, []
 
 
-def javascript_dependency_requirements(path: Path, root: Path) -> tuple[list[str], list[str]]:
+def javascript_dependency_requirements(path: Path, root: Path, registry: CategoryRegistry) -> tuple[list[str], list[str]]:
     """Return JavaScript dependency requirements declared by one JS script."""
-    if path.relative_to(root) == JAVASCRIPT_SNIPPETS:
+    category = javascript_category(registry)
+    if category is not None and path.relative_to(root) == category.snippets_path:
         return [], []
 
-    metadata, errors = selected_script_metadata(path, root)
+    metadata, errors = selected_script_metadata(path, root, registry)
     if errors:
         return [], errors
 
@@ -567,7 +707,7 @@ def javascript_dependency_requirements(path: Path, root: Path) -> tuple[list[str
     return [str(item) for item in requirements if is_javascript_dependency_requirement(item)], []
 
 
-def resolve_javascript_bundle_order(targets: list[Path], root: Path) -> tuple[list[Path], list[str]]:
+def resolve_javascript_bundle_order(targets: list[Path], root: Path, registry: CategoryRegistry) -> tuple[list[Path], list[str]]:
     """Resolve JavaScript targets and dependencies in dependency-first order."""
     order: list[Path] = []
     permanent: set[Path] = set()
@@ -587,11 +727,11 @@ def resolve_javascript_bundle_order(targets: list[Path], root: Path) -> tuple[li
             return
 
         temporary.add(path)
-        requirements, requirement_errors = javascript_dependency_requirements(path, root)
+        requirements, requirement_errors = javascript_dependency_requirements(path, root, registry)
         errors.extend(f"{path.relative_to(root)}: {error}" for error in requirement_errors)
 
         for requirement in requirements:
-            dependency_path, dependency_errors = javascript_dependency_path(requirement, root)
+            dependency_path, dependency_errors = javascript_dependency_path(requirement, root, registry)
             errors.extend(f"{path.relative_to(root)}: {error}" for error in dependency_errors)
             if dependency_path is not None:
                 visit(dependency_path, [*stack, path])
@@ -608,16 +748,38 @@ def resolve_javascript_bundle_order(targets: list[Path], root: Path) -> tuple[li
     return order, []
 
 
-def check_javascript_dependencies(path: Path, root: Path) -> list[str]:
+def check_javascript_dependencies(path: Path, root: Path, registry: CategoryRegistry) -> list[str]:
     """Validate JavaScript dependency metadata for one script."""
     if path.suffix.lower() != ".js":
         return []
-    _order, errors = resolve_javascript_bundle_order([path], root)
+    _order, errors = resolve_javascript_bundle_order([path], root, registry)
     return errors
 
 
-def resolve_run_script(script: str, root: Path) -> Path:
-    """Resolve a run target like python/pingwave to a standalone script path."""
+def category_script_path(category: CategoryConfig, name: str, root: Path) -> Path:
+    """Resolve a direct child script name inside one category."""
+    name_path = Path(name)
+    if name_path.name != name:
+        raise RunError("nested script references are not supported")
+    if name.startswith("snippets"):
+        raise RunError("snippets cannot be used as standalone scripts")
+
+    suffix = name_path.suffix.lower()
+    if suffix and suffix not in category.extensions:
+        supported = ", ".join(category.extensions)
+        raise RunError(f"{category.name} scripts must use one of: {supported}")
+    if not suffix and len(category.extensions) != 1:
+        raise RunError(f"script extension is required for category {category.name}")
+
+    filename = name if suffix else f"{name}{category.extensions[0]}"
+    path = root / category.path / filename
+    if not path.is_file():
+        raise RunError(f"script not found: {category.name}/{filename}")
+    return path
+
+
+def resolve_script_reference(script: str, root: Path, registry: CategoryRegistry) -> Path:
+    """Resolve a script reference through category, alias, or extension mapping."""
     if script in {"codepills", "codepills.py"}:
         raise RunError("codepills cannot run itself")
 
@@ -626,35 +788,30 @@ def resolve_run_script(script: str, root: Path) -> Path:
         raise RunError("SCRIPT must be a relative path")
     if any(part in {"", ".", ".."} for part in requested.parts):
         raise RunError("SCRIPT must not contain empty, current, or parent path parts")
-    if len(requested.parts) != 2:
-        raise RunError("SCRIPT must use <language>/<name>")
 
-    language, name = requested.parts
-    expected_extension = LANGUAGE_EXTENSIONS.get(language)
-    if expected_extension is None:
-        languages = ", ".join(sorted(LANGUAGE_EXTENSIONS))
-        raise RunError(f"unknown language directory {language!r}; expected one of {languages}")
+    if len(requested.parts) > 2:
+        raise RunError("nested script references are not supported")
 
-    name_path = Path(name)
-    if name_path.name != name:
-        raise RunError("SCRIPT name must not contain path separators")
-    if name.startswith("snippets"):
-        raise RunError("snippets cannot be run with this command")
+    if len(requested.parts) == 2:
+        qualifier, name = requested.parts
+        category = registry.categories.get(qualifier) or registry.aliases.get(qualifier)
+        if category is None:
+            raise RunError(f"unknown category or alias: {qualifier}")
+        path = category_script_path(category, name, root)
+    else:
+        name = requested.name
+        suffix = requested.suffix.lower()
+        if not suffix:
+            raise RunError("reference must include a category, alias, or configured file extension")
+        category = registry.extensions.get(suffix)
+        if category is None:
+            raise RunError(f"unsupported extension: {suffix}")
+        path = category_script_path(category, name, root)
 
-    suffix = name_path.suffix
-    if suffix and suffix != expected_extension:
-        raise RunError(f"{language} scripts must use {expected_extension}")
-
-    filename = name if suffix else f"{name}{expected_extension}"
-    path = root / language / filename
-    if not path.is_file():
-        raise RunError(f"script not found: {language}/{filename}")
     if path.resolve() == Path(__file__).resolve():
         raise RunError("codepills cannot run itself")
-    if is_ignored(path, root):
+    if is_ignored(path, root, registry):
         raise RunError("target is not a standalone script")
-    if path.suffix.lower() not in SCRIPT_EXTENSIONS:
-        raise RunError(f"unsupported script extension: {path.suffix}")
     return path
 
 
@@ -667,15 +824,22 @@ def has_shebang(path: Path) -> bool:
         return False
 
 
-def run_command_for(path: Path, args: list[str]) -> list[str]:
+def run_command_for(path: Path, args: list[str], root: Path, registry: CategoryRegistry) -> list[str]:
     """Build the child command for one standalone script."""
     if has_shebang(path):
         return [str(path), *args]
 
-    interpreter = DEFAULT_INTERPRETERS.get(path.suffix.lower())
-    if interpreter is None:
-        raise RunError(f"unsupported script extension: {path.suffix}")
+    category = category_for_path(path, root, registry)
+    interpreter = [sys.executable if item == "sys.executable" else item for item in category.interpreter]
     return [*interpreter, str(path), *args]
+
+
+def is_cli_script(metadata: dict[str, object]) -> bool:
+    """Return true when metadata marks a script as CLI-runnable."""
+    tags = metadata.get("tags", [])
+    if not isinstance(tags, list):
+        return False
+    return any(str(tag).casefold() == "cli" for tag in tags)
 
 
 def is_browser_script(metadata: dict[str, object]) -> bool:
@@ -861,16 +1025,18 @@ def remove_path(path: Path) -> None:
         path.unlink()
 
 
-def reset_language_folders(root: Path) -> None:
+def reset_language_folders(root: Path, registry: CategoryRegistry) -> None:
     """Empty language folders and recreate snippet notebooks."""
-    for language in LANGUAGE_EXTENSIONS:
-        directory = root / language
+    for category in registry.categories.values():
+        directory = root / category.path
         directory.mkdir(parents=True, exist_ok=True)
         for child in directory.iterdir():
+            if child.name == CATEGORY_CONFIG_FILENAME:
+                continue
             remove_path(child)
 
-    for relative in SNIPPET_FILES:
-        path = root / relative
+    for category in registry.categories.values():
+        path = root / category.snippets_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("", encoding="utf-8")
 
@@ -896,7 +1062,7 @@ def reset_git_repo(root: Path) -> None:
 
 def reset_collection(root: Path) -> list[str]:
     """Reset the repository into a fresh Code Pills collection."""
-    reset_language_folders(root)
+    reset_language_folders(root, load_category_registry(root))
     reset_git_repo(root)
     return [
         "emptied language folders",
@@ -1030,11 +1196,23 @@ def parse_snippet_section(
     return (None if errors else record), errors
 
 
-def parse_snippet_file(path: Path, root: Path) -> tuple[list[dict[str, object]], list[str]]:
+def snippet_category_for_path(path: Path, root: Path, registry: CategoryRegistry) -> CategoryConfig | None:
+    """Return the category that owns a snippet file path."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    for category in registry.categories.values():
+        if relative == category.snippets_path:
+            return category
+    return None
+
+
+def parse_snippet_file(path: Path, root: Path, registry: CategoryRegistry) -> tuple[list[dict[str, object]], list[str]]:
     """Parse normalized snippets from one snippets file."""
     relative = path.relative_to(root)
-    config = SNIPPET_FILES.get(relative)
-    if config is None:
+    category = snippet_category_for_path(path, root, registry)
+    if category is None:
         return [], [f"unsupported snippets file: {relative}"]
 
     try:
@@ -1045,8 +1223,8 @@ def parse_snippet_file(path: Path, root: Path) -> tuple[list[dict[str, object]],
     if not any(line.strip() for line in lines):
         return [], []
 
-    comment = str(config["comment"])
-    prefix = str(config["prefix"])
+    comment = category.line_comment
+    prefix = category.alias
     marker_indexes = []
     errors = []
 
@@ -1083,39 +1261,40 @@ def parse_snippet_file(path: Path, root: Path) -> tuple[list[dict[str, object]],
     return ([] if errors else records), errors
 
 
-def iter_snippet_paths(root: Path) -> list[Path]:
+def iter_snippet_paths(root: Path, registry: CategoryRegistry) -> list[Path]:
     """Return existing snippets files that should be validated and searched."""
     paths = []
-    for relative in SNIPPET_FILES:
-        path = root / relative
+    for category in registry.categories.values():
+        path = root / category.snippets_path
         if path.exists():
             paths.append(path)
     return sorted(paths)
 
 
-def check_snippet_file(path: Path, root: Path) -> list[str]:
+def check_snippet_file(path: Path, root: Path, registry: CategoryRegistry) -> list[str]:
     """Validate one snippets notebook and return human-readable errors."""
-    _records, errors = parse_snippet_file(path, root)
+    _records, errors = parse_snippet_file(path, root, registry)
     return errors
 
 
-def find_snippet(snippet_id: str, root: Path) -> tuple[dict[str, object] | None, list[str]]:
+def find_snippet(snippet_id: str, root: Path, registry: CategoryRegistry) -> tuple[dict[str, object] | None, list[str]]:
     """Find one normalized snippet record by ID."""
     normalized_id = snippet_id.casefold()
     if not SNIPPET_LOOKUP_PATTERN.fullmatch(normalized_id):
-        return None, ["snippet ID must look like py0001, sh0001, ps0001, or js0001"]
+        aliases = ", ".join(sorted(registry.aliases))
+        return None, [f"snippet ID must use a configured alias prefix ({aliases}) followed by four digits"]
 
-    relative_path = SNIPPET_PREFIX_TO_PATH.get(normalized_id[:2])
-    if relative_path is None:
+    category = registry.aliases.get(normalized_id[:2])
+    if category is None:
         return None, [f"snippet not found: {normalized_id}"]
 
-    path = root / relative_path
+    path = root / category.snippets_path
     if not path.exists():
         return None, [f"snippet not found: {normalized_id}"]
 
-    records, errors = parse_snippet_file(path, root)
+    records, errors = parse_snippet_file(path, root, registry)
     if errors:
-        return None, [f"{relative_path}:", *[f"  - {error}" for error in errors]]
+        return None, [f"{category.snippets_path}:", *[f"  - {error}" for error in errors]]
 
     matches = [record for record in records if str(record.get("id", "")).casefold() == normalized_id]
     if not matches:
@@ -1163,10 +1342,11 @@ def render_javascript_snippets_module(path: Path) -> str:
     )
 
 
-def render_javascript_bundle_entry(path: Path, root: Path) -> str:
+def render_javascript_bundle_entry(path: Path, root: Path, registry: CategoryRegistry) -> str:
     """Render one JavaScript file or generated module with bundle boundaries."""
     relative = path.relative_to(root).as_posix()
-    if path.relative_to(root) == JAVASCRIPT_SNIPPETS:
+    category = javascript_category(registry)
+    if category is not None and path.relative_to(root) == category.snippets_path:
         content = render_javascript_snippets_module(path)
     else:
         content = path.read_text(encoding="utf-8")
@@ -1180,10 +1360,11 @@ def render_javascript_bundle_entry(path: Path, root: Path) -> str:
 def build_javascript_clipboard_bundle(
     script_path: Path,
     root: Path,
+    registry: CategoryRegistry,
     emitted: set[Path],
 ) -> tuple[str | None, str | None]:
     """Build clipboard content for one JavaScript script with dependencies."""
-    order, errors = resolve_javascript_bundle_order([script_path], root)
+    order, errors = resolve_javascript_bundle_order([script_path], root, registry)
     if errors:
         return None, "; ".join(errors)
 
@@ -1193,7 +1374,7 @@ def build_javascript_clipboard_bundle(
             continue
         emitted.add(path)
         try:
-            parts.append(render_javascript_bundle_entry(path, root))
+            parts.append(render_javascript_bundle_entry(path, root, registry))
         except (OSError, UnicodeDecodeError) as error:
             return None, f"could not read {path.relative_to(root)}: {error}"
     return "\n\n".join(parts), None
@@ -1202,12 +1383,13 @@ def build_javascript_clipboard_bundle(
 def resolve_get_clipboard_reference(
     reference: str,
     root: Path,
+    registry: CategoryRegistry,
     emitted_javascript: set[Path],
 ) -> tuple[str | None, str | None]:
     """Resolve a get reference into clipboard payload content."""
     normalized = reference.casefold()
     if SNIPPET_LOOKUP_PATTERN.fullmatch(normalized):
-        record, errors = find_snippet(reference, root)
+        record, errors = find_snippet(reference, root, registry)
         if errors:
             return None, errors[0]
         if record is None:
@@ -1215,12 +1397,12 @@ def resolve_get_clipboard_reference(
         return str(record.get("content", "")), None
 
     try:
-        script_path = resolve_run_script(reference, root)
+        script_path = resolve_script_reference(reference, root, registry)
     except RunError as error:
         return None, str(error)
 
     if script_path.suffix.lower() == ".js":
-        return build_javascript_clipboard_bundle(script_path, root, emitted_javascript)
+        return build_javascript_clipboard_bundle(script_path, root, registry, emitted_javascript)
 
     try:
         return script_path.read_text(encoding="utf-8"), None
@@ -1228,11 +1410,11 @@ def resolve_get_clipboard_reference(
         return None, f"could not read {script_path.relative_to(root)}: {error}"
 
 
-def resolve_get_reference(reference: str, root: Path) -> tuple[str, str] | tuple[None, str]:
+def resolve_get_reference(reference: str, root: Path, registry: CategoryRegistry) -> tuple[str, str] | tuple[None, str]:
     """Resolve a get reference into display and clipboard payloads, or an error."""
     normalized = reference.casefold()
     if SNIPPET_LOOKUP_PATTERN.fullmatch(normalized):
-        record, errors = find_snippet(reference, root)
+        record, errors = find_snippet(reference, root, registry)
         if errors:
             return None, errors[0]
         if record is None:
@@ -1240,11 +1422,8 @@ def resolve_get_reference(reference: str, root: Path) -> tuple[str, str] | tuple
         content = str(record.get("content", ""))
         return content, content
 
-    if "/" not in reference and "\\" not in reference:
-        return None, "reference must be a snippet ID or <language>/<name> script reference"
-
     try:
-        script_path = resolve_run_script(reference, root)
+        script_path = resolve_script_reference(reference, root, registry)
     except RunError as error:
         return None, str(error)
 
@@ -1318,12 +1497,12 @@ def copy_to_clipboard(text: str) -> str | None:
     return f"no clipboard command found; install one of: {commands}"
 
 
-def load_search_records(root: Path) -> list[dict[str, object]]:
+def load_search_records(root: Path, registry: CategoryRegistry) -> list[dict[str, object]]:
     """Load valid metadata records for searchable scripts and snippets."""
     records = []
-    for path in iter_script_paths(root):
+    for path in iter_script_paths(root, registry):
         try:
-            metadata = parse_metadata(extract_metadata_lines(path))
+            metadata = parse_metadata(extract_metadata_lines(path, root, registry))
         except (OSError, UnicodeDecodeError, MetadataError) as error:
             print(
                 f"warning: skipping {path.relative_to(root)}: {error}",
@@ -1343,8 +1522,8 @@ def load_search_records(root: Path) -> list[dict[str, object]]:
         metadata["path"] = path.relative_to(root).as_posix()
         records.append(metadata)
 
-    for path in iter_snippet_paths(root):
-        snippet_records, errors = parse_snippet_file(path, root)
+    for path in iter_snippet_paths(root, registry):
+        snippet_records, errors = parse_snippet_file(path, root, registry)
         if errors:
             print(f"warning: skipping {path.relative_to(root)}:", file=sys.stderr)
             for error in errors:
@@ -1441,15 +1620,20 @@ def print_search_table(records: list[dict[str, object]], *, details: bool) -> No
 
 def command_check(_args: argparse.Namespace, root: Path) -> int:
     """Validate standalone script metadata headers and snippet notebooks."""
+    try:
+        registry = load_category_registry(root)
+    except CategoryConfigError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     failures: dict[Path, list[str]] = {}
 
-    for path in iter_script_paths(root):
-        errors = check_file(path, root)
+    for path in iter_script_paths(root, registry):
+        errors = check_file(path, root, registry)
         if errors:
             failures[path.relative_to(root)] = errors
 
-    for path in iter_snippet_paths(root):
-        errors = check_snippet_file(path, root)
+    for path in iter_snippet_paths(root, registry):
+        errors = check_snippet_file(path, root, registry)
         if errors:
             failures[path.relative_to(root)] = errors
 
@@ -1471,9 +1655,19 @@ def command_import(args: argparse.Namespace, root: Path) -> int:
         print(f"error: source is not a file: {source}", file=sys.stderr)
         return 1
 
+    try:
+        registry = load_category_registry(root)
+    except CategoryConfigError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
     suffix = source.suffix.lower()
-    if suffix not in DESTINATION_DIRS:
-        supported = ", ".join(sorted(DESTINATION_DIRS))
+    if not suffix:
+        print("error: imported files must have a configured extension", file=sys.stderr)
+        return 1
+    category = registry.extensions.get(suffix)
+    if category is None:
+        supported = ", ".join(sorted(registry.extensions))
         print(f"error: unsupported extension {suffix!r}; expected one of {supported}", file=sys.stderr)
         return 1
 
@@ -1482,7 +1676,7 @@ def command_import(args: argparse.Namespace, root: Path) -> int:
         print("error: --name must be a filename stem without path or extension", file=sys.stderr)
         return 1
 
-    destination = root / DESTINATION_DIRS[suffix] / f"{stem}{source.suffix}"
+    destination = root / category.path / f"{stem}{source.suffix}"
     if destination.exists():
         print(f"error: destination already exists: {destination.relative_to(root)}", file=sys.stderr)
         return 1
@@ -1490,7 +1684,7 @@ def command_import(args: argparse.Namespace, root: Path) -> int:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if has_metadata_header(source):
         try:
-            errors = copy_with_existing_metadata(source, destination, root)
+            errors = copy_with_existing_metadata(source, destination, root, category)
         except RepoConfigError as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
@@ -1502,11 +1696,11 @@ def command_import(args: argparse.Namespace, root: Path) -> int:
             return 1
     else:
         try:
-            metadata = default_metadata(source, destination, root)
+            metadata = default_metadata(source, destination, root, category)
         except RepoConfigError as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
-        insert_metadata_header(source, destination, metadata)
+        insert_metadata_header(source, destination, metadata, category)
 
     print(f"Imported {source} -> {destination.relative_to(root)}")
     return 0
@@ -1514,8 +1708,13 @@ def command_import(args: argparse.Namespace, root: Path) -> int:
 
 def command_search(args: argparse.Namespace, root: Path) -> int:
     """Search standalone scripts by metadata fields."""
+    try:
+        registry = load_category_registry(root)
+    except CategoryConfigError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     records = [
-        record for record in load_search_records(root) if record_matches(record, args)
+        record for record in load_search_records(root, registry) if record_matches(record, args)
     ]
 
     if not records:
@@ -1529,16 +1728,24 @@ def command_search(args: argparse.Namespace, root: Path) -> int:
 def command_run(args: argparse.Namespace, root: Path) -> int:
     """Run a selected standalone script and pass through remaining arguments."""
     try:
-        script_path = resolve_run_script(args.script, root)
-    except RunError as error:
+        registry = load_category_registry(root)
+        script_path = resolve_script_reference(args.script, root, registry)
+    except (CategoryConfigError, RunError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
-    metadata, errors = selected_script_metadata(script_path, root)
+    metadata, errors = selected_script_metadata(script_path, root, registry)
     if errors:
         print(f"error: selected script metadata is invalid: {script_path.relative_to(root)}", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
+        return 1
+
+    if not is_cli_script(metadata):
+        print(
+            f"error: {script_path.relative_to(root)} is not tagged as cli and cannot be run here",
+            file=sys.stderr,
+        )
         return 1
 
     if script_path.suffix.lower() == ".js" and is_browser_script(metadata):
@@ -1549,7 +1756,7 @@ def command_run(args: argparse.Namespace, root: Path) -> int:
         return 1
 
     try:
-        command = run_command_for(script_path, args.script_args)
+        command = run_command_for(script_path, args.script_args, root, registry)
         completed = subprocess.run(command, check=False)
     except FileNotFoundError as error:
         print(f"error: command not found: {error.filename}", file=sys.stderr)
@@ -1565,9 +1772,14 @@ def command_get(args: argparse.Namespace, root: Path) -> int:
     """Print snippets or script paths, optionally copying retrieved content."""
     resolved = []
     errors = []
+    try:
+        registry = load_category_registry(root)
+    except CategoryConfigError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
 
     for reference in args.references:
-        display, clipboard = resolve_get_reference(reference, root)
+        display, clipboard = resolve_get_reference(reference, root, registry)
         if display is None:
             errors.append(clipboard)
         else:
@@ -1582,7 +1794,7 @@ def command_get(args: argparse.Namespace, root: Path) -> int:
     if args.copy:
         emitted_javascript: set[Path] = set()
         for reference in args.references:
-            clipboard, error = resolve_get_clipboard_reference(reference, root, emitted_javascript)
+            clipboard, error = resolve_get_clipboard_reference(reference, root, registry, emitted_javascript)
             if error is not None:
                 errors.append(error)
             elif clipboard is not None and clipboard != "":
@@ -1635,6 +1847,9 @@ def command_reset(args: argparse.Namespace, root: Path) -> int:
 
     try:
         actions = reset_collection(root)
+    except CategoryConfigError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     except OSError as error:
         print(f"error: reset failed: {error}", file=sys.stderr)
         return 1

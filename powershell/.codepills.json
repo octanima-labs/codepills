@@ -1,0 +1,12 @@
+{
+  "extensions": [".ps1"],
+  "alias": "ps",
+  "interpreter": ["pwsh", "-NoProfile", "-File"],
+  "lineComment": "#",
+  "snippets": "snippets.ps1",
+  "metadataComment": {
+    "type": "block",
+    "open": "<#",
+    "close": "#>"
+  }
+}
