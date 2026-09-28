@@ -199,3 +199,41 @@ foreach ($target in $targets) {
         if ($tcp) { $tcp.Dispose() }
     }
 }
+
+
+# ### ID: ps0010 ###
+# Title: grepfile
+# Description: Keep regex-matching lines from a file and save them to a clean output file.
+# Tags:
+# - powershell
+# - regex
+# - files
+# Platforms:
+# - Windows
+# - Linux
+# - macOS
+
+function grepfile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Pattern,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [string] $OutputPath
+    )
+
+    if (-not $OutputPath) {
+        $directory = Split-Path -Path $Path -Parent
+        $filename = Split-Path -Path $Path -Leaf
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($filename)
+        $extension = [System.IO.Path]::GetExtension($filename)
+        $cleanName = "${stem}_clean${extension}"
+        $OutputPath = if ($directory) { Join-Path -Path $directory -ChildPath $cleanName } else { $cleanName }
+    }
+
+    Select-String -Pattern $Pattern -Path $Path |
+        ForEach-Object { $_.Line } |
+        Set-Content -Path $OutputPath -Encoding utf8
+}

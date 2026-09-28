@@ -236,3 +236,33 @@ copy_to_clipboard() {
 }
 
 alias c2c='copy_to_clipboard'
+
+
+# ### ID: sh0013 ###
+# Title: grepfile
+# Description: Keep regex-matching lines from a file and save them to a clean output file.
+# Tags:
+# - bash
+# - grep
+# - regex
+# - files
+# Platforms:
+# - Linux
+# - macOS
+
+grepfile() {
+    local pattern=$1
+    local path=$2
+    local output=${3:-}
+
+    if [ -z "$output" ]; then
+        local dir base stem ext
+        dir=$(dirname -- "$path")
+        base=$(basename -- "$path")
+        stem=${base%.*}
+        ext=${base#"$stem"}
+        output="$dir/${stem}_clean${ext}"
+    fi
+
+    grep -E "$pattern" "$path" > "$output"
+}
