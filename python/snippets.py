@@ -1,4 +1,4 @@
-__all__ = ["Cprint", "cprint", "safe_filename"]
+__all__ = ["Cprint", "cprint", "safe_filename", "word2text"]
 
 
 # ### ID: py0001 ###
@@ -356,3 +356,68 @@ def safe_filename(
         sanitized_tokens.append(sanitize_component(token, component_is_dir))
 
     return "".join(sanitized_tokens)
+
+
+# ### ID: py0008 ###
+# Title: word2text
+# Description: Normalize Word-copied bullet list text into consistent plain-text indentation.
+# Tags:
+# - python
+# - text
+# - word
+# - lists
+# - clipboard
+# Platforms:
+# - Linux
+# - macOS
+# - Windows
+
+def word2text(text: str | None = None, indent_size: int = 4, clipboard_io: bool = False) -> str | None:
+    """Normalize Word-copied bullet lists, optionally reading/writing clipboard text.
+
+    When ``clipboard_io`` is true, ``pyperclip`` is imported lazily. If ``text``
+    is omitted in clipboard mode, input is read from the clipboard and the
+    normalized output is copied back to the clipboard.
+    """
+
+    import re
+
+    if clipboard_io:
+        try:
+            import pyperclip
+        except ImportError:
+            print("pyperclip is required for clipboard use: pip install pyperclip")
+            return None
+
+        if text is None:
+            text = pyperclip.paste()
+
+    if text is None:
+        raise ValueError("text is required unless clipboard_io=True")
+
+    def format_line(line: str) -> str:
+        line = line.replace("\xa0", " ")
+        stripped = line.strip()
+        if not stripped:
+            return ""
+
+        if re.match(r"^[\uf0a7￭▪■-]\s+", stripped):
+            content = re.sub(r"^[\uf0a7￭▪■-]\s+", "", stripped)
+            return f"{' ' * (indent_size * 2)}￭ {content}"
+
+        if re.match(r"^[o○°•]\s+", stripped) and not stripped.startswith("• "):
+            content = re.sub(r"^[o○°•]\s+", "", stripped)
+            return f"{' ' * indent_size}o {content}"
+
+        if re.match(r"^[\u2022•]\s+", stripped):
+            content = re.sub(r"^[\u2022•]\s+", "", stripped)
+            return f"• {content}"
+
+        return stripped
+
+    output = "\n".join(format_line(line) for line in text.splitlines())
+
+    if clipboard_io:
+        pyperclip.copy(output)
+
+    return output
