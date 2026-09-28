@@ -143,18 +143,6 @@ function Get-DefaultDNSServer {
     }
 }
 
-# Get AD user
-$searcher = [adsisearcher]"(samAccountName={username})";
-$user = $searcher.FindOne();
-if ($user) {{
-    $fullName = $user.Properties.displayname;
-    $initials = $user.Properties.initials;
-    $mail = $user.Properties.mail;
-    Write-Output "$fullName|$initials|$email"
-}} else {{
-    Write-Output "NOT_FOUND"
-}}
-
 # Hash files in current dir
 Get-ChildItem -File | Get-FileHash | Select-Object Hash, @{Name="FileName"; Expression={(Split-Path $_.Path -Leaf)}} | Format-Table -AutoSize
 
@@ -236,4 +224,41 @@ function grepfile {
     Select-String -Pattern $Pattern -Path $Path |
         ForEach-Object { $_.Line } |
         Set-Content -Path $OutputPath -Encoding utf8
+}
+
+
+# ### ID: ps0011 ###
+# Title: Get AD user
+# Description: Query Active Directory for a user by samAccountName and return selected properties as compact JSON.
+# Tags:
+# - powershell
+# - active-directory
+# - ldap
+# - user
+# - json
+# Platforms:
+# - Windows
+
+function Get-AdUserInfo {
+    param(
+        [string] $Username = $env:USERNAME
+    )
+
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+
+    $escapedUsername = $Username.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29').Replace([char]0, '\00')
+    $searcher = [adsisearcher]"(samAccountName=$escapedUsername)"
+    $user = $searcher.FindOne()
+
+    if ($user) {
+        [PSCustomObject]@{
+            username = $Username
+            full_name = [string]$user.Properties.displayname
+            initials = [string]$user.Properties.initials
+            mail = [string]$user.Properties.mail
+        } | ConvertTo-Json -Compress
+    } else {
+        "NOT_FOUND"
+    }
 }
