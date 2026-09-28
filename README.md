@@ -113,6 +113,15 @@ from codepills.browpic import (
     create_server,
     serve,
 )
+from codepills.beautify import (
+    BeautifyError,
+    beautify_file,
+    beautify_html,
+    beautify_json,
+    beautify_paths,
+    beautify_xml,
+    detect_syntax,
+)
 ```
 
 To start a fresh Code Pills collection from this toolset:
