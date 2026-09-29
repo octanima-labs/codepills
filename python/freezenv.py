@@ -1,12 +1,12 @@
 # CODEPILLS-META-BEGIN
 # schema: codepills.tool/v1
 # name: freezenv
-# version: 1.0.0
+# version: 1.1.0
 # author: octanima-labs
 # description: Generate auto_requirements.txt from packages installed in a Python virtual environment.
 # repo: https://github.com/octanima-labs/codepills/blob/main/python/freezenv.py
 # license: MIT
-# usage: python python/freezenv.py [PATH]
+# usage: python python/freezenv.py [-r|--recursive] [PATH]
 # tags:
 #   - python
 #   - cli
@@ -24,7 +24,8 @@
 ``freezenv`` is a small, dependency-free alternative to running ``pip freeze``
 inside a virtual environment. It scans package metadata from a venv located at
 the provided path, ``venv`` subdirectory, or ``.venv`` subdirectory, then writes
-the discovered packages to ``auto_requirements.txt``.
+the discovered packages to ``auto_requirements.txt``. In recursive mode, it
+finds every virtual environment under the provided path and freezes each one.
 
 Examples:
     Generate requirements for the current directory::
@@ -34,6 +35,10 @@ Examples:
     Generate requirements for a specific project directory::
 
         python freezenv.py /path/to/project
+
+    Generate requirements for every venv below a directory::
+
+        python freezenv.py --recursive /path/to/projects
 
     Run the built-in self-tests::
 
@@ -57,10 +62,11 @@ __all__ = [
     "OUTPUT_FILENAME",
     "FreezenvError",
     "discover_venv",
+    "discover_venvs_recursive",
     "find_site_packages",
     "freeze_requirements",
     "write_requirements",
-    "generate_requirements_from_venv",
+    "freeze_venv",
 ]
 
 
@@ -78,6 +84,18 @@ def discover_venv(path: str | os.PathLike[str]) -> Path:
             return candidate
 
     raise FreezenvError("No virtual environment found at the provided path or subdirectories.")
+
+
+def discover_venvs_recursive(path: str | os.PathLike[str]) -> list[Path]:
+    """Return all virtual environment directories found below path."""
+
+    venvs = []
+    for current_root, dirnames, filenames in os.walk(path):
+        if "pyvenv.cfg" in filenames:
+            venvs.append(Path(current_root))
+            dirnames[:] = []
+
+    return sorted(venvs, key=lambda item: str(item).lower())
 
 
 def find_site_packages(venv_path: str | os.PathLike[str]) -> Path:
@@ -146,26 +164,67 @@ def write_requirements(
     return output_file
 
 
-def generate_requirements_from_venv(path: str) -> list[str] | str:
-    """Create ``auto_requirements.txt`` from package metadata in a venv.
+def _recursive_output_dir(venv_path: Path) -> Path:
+    """Return the output directory for a recursively discovered venv."""
 
-    The function looks for a virtual environment in three locations, in order:
-    the provided ``path`` itself, ``path/venv``, and ``path/.venv``. Once found,
-    it locates a platform-specific ``site-packages`` directory and reads each
-    package's ``.dist-info/METADATA`` file to collect ``Name`` and ``Version``.
+    if venv_path.name in {"venv", ".venv"}:
+        return venv_path.parent
+    return venv_path
+
+
+def freeze_venv(
+    path: str | os.PathLike[str], recursive: bool = False
+) -> list[str] | str | dict[str, list[str] | str]:
+    """Create ``auto_requirements.txt`` from package metadata in one or more venvs.
+
+    In non-recursive mode, the function looks for a virtual environment in
+    three locations, in order: the provided ``path`` itself, ``path/venv``, and
+    ``path/.venv``. Once found, it locates a platform-specific ``site-packages``
+    directory and reads each package's ``.dist-info/METADATA`` file to collect
+    ``Name`` and ``Version``.
+
+    In recursive mode, the function freezes every virtual environment below the
+    provided ``path``. For discovered ``venv`` and ``.venv`` directories, output
+    is written to the parent project directory; otherwise, output is written to
+    the virtual environment directory itself.
 
     Base packaging tools such as ``pip`` and ``setuptools`` are omitted. The
-    remaining dependencies are deduplicated, sorted case-insensitively, written
-    to ``auto_requirements.txt`` in the provided ``path``, and returned.
+    remaining dependencies are deduplicated and sorted case-insensitively.
 
     Args:
         path: Directory containing a venv directly, or containing ``venv`` or
-            ``.venv`` as a subdirectory.
+            ``.venv`` as a subdirectory. In recursive mode, directory to scan.
+        recursive: Whether to scan for and freeze every virtual environment
+            below ``path``.
 
     Returns:
-        A sorted list of ``name==version`` requirement strings on success.
-        On failure, returns an error string beginning with ``"Error:"``.
+        In non-recursive mode, returns a sorted list of ``name==version``
+        requirement strings on success, or an error string beginning with
+        ``"Error:"`` on failure. In recursive mode, returns a dictionary keyed
+        by venv path, where each value is either a sorted requirement list or an
+        error string beginning with ``"Error:"``.
     """
+    if recursive:
+        venvs = discover_venvs_recursive(path)
+        if not venvs:
+            return {str(Path(path)): "Error: No virtual environments found under the provided path."}
+
+        results: dict[str, list[str] | str] = {}
+        for venv_path in venvs:
+            try:
+                dependencies = freeze_requirements(venv_path)
+                write_requirements(
+                    venv_path,
+                    dependencies,
+                    _recursive_output_dir(venv_path) / OUTPUT_FILENAME,
+                )
+            except FreezenvError as error:
+                results[str(venv_path)] = f"Error: {error}"
+            else:
+                results[str(venv_path)] = dependencies
+
+        return results
+
     try:
         dependencies = freeze_requirements(path)
         write_requirements(path, dependencies)
@@ -203,7 +262,7 @@ def _run_tests() -> bool:
         _write_metadata(site_packages, "pip-24.0.dist-info", "pip", "24.0")
         _write_metadata(site_packages, "alpha-copy.dist-info", "alpha", "2.0")
 
-        result = generate_requirements_from_venv(project)
+        result = freeze_venv(project)
         expected = ["alpha==2.0", "Zebra==1.0"]
         assert result == expected, f"expected {expected!r}, got {result!r}"
 
@@ -219,10 +278,12 @@ def _run_tests() -> bool:
             f.write("home = C:\\Python\n")
 
         _write_metadata(site_packages, "requests-2.32.0.dist-info", "requests", "2.32.0")
-        assert generate_requirements_from_venv(direct_venv) == ["requests==2.32.0"]
+        assert freeze_venv(direct_venv) == ["requests==2.32.0"]
 
     with tempfile.TemporaryDirectory() as tmp:
-        assert generate_requirements_from_venv(tmp).startswith("Error: No virtual environment")
+        result = freeze_venv(tmp)
+        assert isinstance(result, str)
+        assert result.startswith("Error: No virtual environment")
 
     with tempfile.TemporaryDirectory() as tmp:
         venv = os.path.join(tmp, "venv")
@@ -230,7 +291,51 @@ def _run_tests() -> bool:
         with open(os.path.join(venv, "pyvenv.cfg"), "w", encoding="utf-8") as f:
             f.write("home = /usr/bin\n")
 
-        assert generate_requirements_from_venv(tmp) == "Error: Could not locate site-packages directory."
+        assert freeze_venv(tmp) == "Error: Could not locate site-packages directory."
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project_a = os.path.join(tmp, "project-a")
+        project_b = os.path.join(tmp, "project-b")
+        custom_venv = os.path.join(tmp, "custom-env")
+        site_a = os.path.join(project_a, ".venv", "lib", "python3.12", "site-packages")
+        site_b = os.path.join(project_b, "venv", "lib", "python3.12", "site-packages")
+        site_custom = os.path.join(custom_venv, "Lib", "site-packages")
+
+        for venv_path, site_packages in (
+            (os.path.join(project_a, ".venv"), site_a),
+            (os.path.join(project_b, "venv"), site_b),
+            (custom_venv, site_custom),
+        ):
+            os.makedirs(site_packages)
+            with open(os.path.join(venv_path, "pyvenv.cfg"), "w", encoding="utf-8") as f:
+                f.write("home = /usr/bin\n")
+
+        _write_metadata(site_a, "alpha-1.0.dist-info", "alpha", "1.0")
+        _write_metadata(site_b, "bravo-2.0.dist-info", "bravo", "2.0")
+        _write_metadata(site_custom, "charlie-3.0.dist-info", "charlie", "3.0")
+
+        result = freeze_venv(tmp, recursive=True)
+        expected = {
+            os.path.join(project_a, ".venv"): ["alpha==1.0"],
+            os.path.join(project_b, "venv"): ["bravo==2.0"],
+            custom_venv: ["charlie==3.0"],
+        }
+        assert result == expected, f"expected {expected!r}, got {result!r}"
+
+        expected_outputs = (
+            (project_a, "alpha==1.0"),
+            (project_b, "bravo==2.0"),
+            (custom_venv, "charlie==3.0"),
+        )
+        for output_dir, expected_contents in expected_outputs:
+            output_file = os.path.join(output_dir, OUTPUT_FILENAME)
+            with open(output_file, "r", encoding="utf-8") as f:
+                assert f.read() == expected_contents
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = freeze_venv(tmp, recursive=True)
+        expected = {tmp: "Error: No virtual environments found under the provided path."}
+        assert result == expected, f"expected {expected!r}, got {result!r}"
 
     return True
 
@@ -249,6 +354,12 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=".",
         help="directory containing a venv, venv/, or .venv/ (default: current directory)",
+    )
+    parser.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="scan recursively and freeze every virtual environment found",
     )
     parser.add_argument(
         "-t",
@@ -273,10 +384,23 @@ def _main(argv: list[str] | None = None) -> int:
         print("Self-tests passed.")
         return 0
 
-    result = generate_requirements_from_venv(args.path)
+    result = freeze_venv(args.path, recursive=args.recursive)
     if isinstance(result, str):
         print(result, file=sys.stderr)
         return 1
+
+    if isinstance(result, dict):
+        exit_code = 0
+        for venv_path, dependencies in result.items():
+            if isinstance(dependencies, str):
+                print(f"{venv_path}: {dependencies}", file=sys.stderr)
+                exit_code = 1
+                continue
+
+            output_file = _recursive_output_dir(Path(venv_path)) / OUTPUT_FILENAME
+            print(f"Wrote {len(dependencies)} dependencies to {output_file}")
+
+        return exit_code
 
     output_file = os.path.join(args.path, OUTPUT_FILENAME)
     print(f"Wrote {len(result)} dependencies to {output_file}")

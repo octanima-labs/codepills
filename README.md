@@ -100,10 +100,11 @@ from codepills.freezenv import (
     OUTPUT_FILENAME,
     FreezenvError,
     discover_venv,
+    discover_venvs_recursive,
     find_site_packages,
     freeze_requirements,
     write_requirements,
-    generate_requirements_from_venv,
+    freeze_venv,
 )
 from codepills.browpic import (
     DEFAULT_PORT,
